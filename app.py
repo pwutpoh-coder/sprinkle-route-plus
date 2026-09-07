@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("📍 Sprinkle Route Plus")
-st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (High-Performance Route Optimization)")
+st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Minimal High-Performance Route Optimization)")
 
 # Sidebar Control
 st.sidebar.header("⚙️ ตั้งค่าข้อมูล")
@@ -33,7 +33,7 @@ def get_day_count(year, month, day_name):
     cnt = sum(1 for week in cal if week[target_idx] != 0)
     return cnt if cnt > 0 else 4
 
-# Caching การสร้างแม่สี
+# Caching การสร้างแม่สีประจำเบอร์รถ
 @st.cache_data
 def assign_vehicle_colors(df):
     unique_cars = sorted(df['เบอร์รถ'].astype(str).unique())
@@ -96,16 +96,23 @@ def calculate_vehicle_utilization(df, year, month):
         })
     return pd.DataFrame(summary_list)
 
-# ฟังก์ชันแสดงแผนที่ความเร็วสูง
+# ฟังก์ชันแสดงแผนที่มินิมอลสีสว่าง (CartoDB Positron) โหลดเร็วสูง
 def render_folium_map_fast(df_input, selected_cars, key_prefix):
     map_center = [df_input['latitude'].mean(), df_input['longitude'].mean()]
-    m = folium.Map(location=map_center, zoom_start=12, tiles="OpenStreetMap")
+    
+    # ใช้ไทล์แผนที่โทนขาว-เทาสว่าง เรียบง่าย ไม่กินสเปก
+    m = folium.Map(
+        location=map_center,
+        zoom_start=12,
+        tiles="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+        attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    )
 
-    # กรองเฉพาะจุดที่ต้องแสดงผลเพื่อประหยัดหน่วยความจำ
+    # แยกกรองข้อมูลเพื่อความรวดเร็วในการเรนเดอร์
     df_visible = df_input[df_input['เบอร์รถ'].astype(str).isin(selected_cars)]
     df_gray = df_input[~df_input['เบอร์รถ'].astype(str).isin(selected_cars)]
 
-    # แสดงจุดเบอร์รถที่เลือก
+    # แสดงหมุดพิกัดของเบอร์รถที่เลือก
     for _, row in df_visible.iterrows():
         car_str = str(row['เบอร์รถ'])
         marker_color = row['base_color']
@@ -130,23 +137,23 @@ def render_folium_map_fast(df_input, selected_cars, key_prefix):
             tooltip=f"🚚 รถ: {car_str} | {row.get('ชื่อ-นามสกุล', '-')}"
         ).add_to(m)
 
-    # รวมจุดเทาที่ไม่เลือกไว้เป็น Cluster เพื่อให้โหลดเร็วขึ้นมาก
+    # รวมจุดสีเทาที่ไม่ถูกเลือกให้เป็นกลุ่ม Cluster เพื่อประหยัดการเรนเดอร์บนเบราว์เซอร์
     if not df_gray.empty:
         gray_cluster = MarkerCluster(name="จุดที่ไม่ถูกเลือก", options={'maxClusterRadius': 40}).add_to(m)
         for _, row in df_gray.iterrows():
             folium.CircleMarker(
                 location=[row['latitude'], row['longitude']],
                 radius=4,
-                color='#D3D3D3',
+                color='#CCCCCC',
                 fill=True,
-                fill_color='#D3D3D3',
+                fill_color='#CCCCCC',
                 fill_opacity=0.4
             ).add_to(gray_cluster)
 
-    # returned_objects=[] ช่วยให้หน้าเว็บไม่กระตุกเวลาคลิกแผนที่
+    # returned_objects=[] เพื่อป้องกันการส่งข้อมูลกลับฝั่ง Server เวลาเลื่อน/คลิกแผนที่
     st_folium(m, width="100%", height=500, key=f"folium_{key_prefix}", returned_objects=[])
 
-# แสดงตารางแบบแบ่งหน้า Fast Dataframe
+# ฟังก์ชันจัดการการแสดงผลตารางแบบปรับจำนวนรายการได้
 def render_limited_dataframe(df_to_show, key_suffix):
     col_limit, _ = st.columns([1, 2])
     with col_limit:
@@ -161,7 +168,7 @@ def render_limited_dataframe(df_to_show, key_suffix):
         st.dataframe(df_to_show, use_container_width=True)
     else:
         st.dataframe(df_to_show.head(limit), use_container_width=True)
-        st.caption(f"⚡ แสดง {limit} รายการแรกเพื่อความรวดเร็ว (ดาวน์โหลดทั้งหมดได้ที่ Tab 3)")
+        st.caption(f"⚡ แสดง {limit} รายการแรกเพื่อความรวดเร็ว (ดาวน์โหลดข้อมูลทั้งหมดได้ที่ Tab 3)")
 
 # อัลกอริทึมจัดสายส่งแบบ Fast Spatial Clustering
 def rebalance_routes_spatial(df_in, target_cars, fix_stay_ids, fix_move_ids, fraction_to_move):
@@ -199,14 +206,16 @@ if uploaded_file is not None:
         
         tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่สีพิกัด", "⚡ จัดสายส่งใหม่ (3 ทางเลือก)", "📥 สรุปและ Export ข้อมูล"])
         
-        # TAB 1
+        # ----------------------------------------------------
+        # TAB 1: INSPECTION
+        # ----------------------------------------------------
         with tab1:
             st.subheader("📌 สรุปกำลังส่งเฉลี่ยต่อวันเทียบเปอร์เซ็นต์ (% Utilization)")
             veh_summary = calculate_vehicle_utilization(df, target_year, target_month)
             st.dataframe(veh_summary, use_container_width=True)
             
             st.divider()
-            st.subheader("🗺️ แผนที่พิกัดส่งน้ำดื่ม (OpenStreetMap โหมดความเร็วสูง)")
+            st.subheader("🗺️ แผนที่พิกัดส่งน้ำดื่ม (โหมดมินิมอลสว่าง - คลีนและโหลดไว)")
             
             selected_cars_tab1 = st.multiselect(
                 "🎨 เลือกเบอร์รถเพื่อเน้นแสดงผลพิกัดบนแผนที่:",
@@ -224,7 +233,9 @@ if uploaded_file is not None:
             existing_cols = [c for c in cols_to_show if c in filtered_df_tab1.columns]
             render_limited_dataframe(filtered_df_tab1[existing_cols], "tab1")
 
-        # TAB 2
+        # ----------------------------------------------------
+        # TAB 2: OPTIMIZATION (3 OPTIONS)
+        # ----------------------------------------------------
         with tab2:
             st.subheader("⚙️ เงื่อนไขการจัดสายส่งใหม่")
             col_a, col_b = st.columns(2)
@@ -267,7 +278,9 @@ if uploaded_file is not None:
                             st.session_state['selected_option_df'] = current_df
                             st.success(f"บันทึกทางเลือกที่ {idx} เรียบร้อยแล้ว")
 
-        # TAB 3
+        # ----------------------------------------------------
+        # TAB 3: EXPORT
+        # ----------------------------------------------------
         with tab3:
             st.subheader("📥 Export ข้อมูล")
             final_export_df = st.session_state.get('selected_option_df', df)
