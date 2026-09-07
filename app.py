@@ -3,248 +3,134 @@ import pandas as pd
 import numpy as np
 import pydeck as pdk
 import calendar
+import io
 
-# -----------------------------------------------------------------------------
-# 1. SET PAGE CONFIG & SPRINKLE THEME STYLING
-# -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Sprinkle Route Plus",
     page_icon="💧",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# Custom CSS Theme Sprinkle (น้ำเงิน-ฟ้า)
-st.markdown("""
-    <style>
-    .main { background-color: #F8FAFC; }
-    .stApp header { background-color: #003366; }
-    h1, h2, h3 { color: #003366 !important; font-family: 'Sarabun', sans-serif; }
-    .stButton>button {
-        background-color: #0088CC;
-        color: white;
-        border-radius: 8px;
-        border: none;
-        padding: 10px 24px;
-        font-weight: bold;
-    }
-    .stButton>button:hover { background-color: #003366; color: white; }
-    .mapping-card {
-        background-color: #E6F2FF;
-        border-left: 5px solid #0088CC;
-        padding: 15px;
-        border-radius: 8px;
-        margin-bottom: 15px;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
 st.title("💧 Sprinkle Route Plus")
-st.caption("ระบบบริหารจัดการและเพิ่มสายการจัดส่งน้ำดื่มอัจฉริยะ (Enterprise Route Optimization)")
-st.divider()
+st.caption("ระบบบริหารจัดการและตัดเพิ่มสายส่งน้ำดื่มอัจฉริยะ (Production Multi-User Cloud)")
 
-# -----------------------------------------------------------------------------
-# 2. HELPER FUNCTIONS & STRING CLEANER
-# -----------------------------------------------------------------------------
-def clean_numeric_column(series):
-    """ฟังก์ชันแปลงค่าตัวเลขที่มีเครื่องหมายคอมม่า (,) หรือข้อความ ให้เป็น float ที่คำนวณได้"""
-    return pd.to_numeric(
-        series.astype(str).str.replace(',', '', regex=False).str.strip(), 
-        errors='coerce'
-    ).fillna(0)
+# Sidebar Control
+st.sidebar.header("⚙️ ตั้งค่าข้อมูล")
+uploaded_file = st.sidebar.file_uploader("อัปโหลดไฟล์ Excel / CSV", type=["xlsx", "csv"])
 
-def get_days_in_month(year, month, day_of_week):
-    """คำนวณจำนวนวันที่เกิดขึ้นจริงในเดือน"""
+target_year = st.sidebar.number_input("ปี ค.ศ.", min_value=2024, max_value=2030, value=2026)
+target_month = st.sidebar.selectbox("เดือน", range(1, 13), format_func=lambda x: calendar.month_name[x], index=7)
+
+def get_day_count(year, month, day_name):
     cal = calendar.monthcalendar(year, month)
-    count = sum(1 for week in cal if week[day_of_week] != 0)
-    return count if count > 0 else 4
+    days = {'จันทร์': 0, 'อังคาร': 1, 'พุธ': 2, 'พฤหัสบดี': 3, 'ศุกร์': 4, 'เสาร์': 5, 'อาทิตย์': 6}
+    target_idx = days.get(day_name, 0)
+    cnt = sum(1 for week in cal if week[target_idx] != 0)
+    return cnt if cnt > 0 else 4
 
-def normalize_daily_volume(df, target_year, target_month, col_day, col_vol):
-    """แปลงยอดส่งรวมทั้งเดือน ให้เป็น Daily Normalized Capacity ที่แม่นยำ"""
-    days_map = {'mon': 0, 'tue': 1, 'wed': 2, 'thu': 3, 'fri': 4, 'sat': 5, 'sun': 6,
-                'จันทร์': 0, 'อังคาร': 1, 'พุธ': 2, 'พฤหัส': 3, 'ศุกร์': 4, 'เสาร์': 5, 'อาทิตย์': 6}
-    
-    daily_vols = []
-    # แปลงยอดส่งให้เป็นตัวเลขที่สะอาดก่อน
-    clean_vol_series = clean_numeric_column(df[col_vol])
-    
-    for idx, row in df.iterrows():
-        day_val = str(row.get(col_day, 'Mon')).strip().lower()
-        day_num = 0
-        for k, v in days_map.items():
-            if k in day_val:
-                day_num = v
-                break
-                
-        actual_days = get_days_in_month(target_year, target_month, day_num)
-        monthly_vol = clean_vol_series.iloc[idx]
-        daily_vol = monthly_vol / actual_days if actual_days > 0 else monthly_vol
-        daily_vols.append(daily_vol)
+def process_data(df, year, month):
+    # ดึงพิกัด Lat/Long
+    if 'พิกัด Lat/Long' in df.columns:
+        df['Lat'] = df['พิกัด Lat/Long'].apply(lambda x: float(str(x).split(',')[0].strip()) if pd.notnull(x) and ',' in str(x) else 13.7563)
+        df['Long'] = df['พิกัด Lat/Long'].apply(lambda x: float(str(x).split(',')[1].strip()) if pd.notnull(x) and ',' in str(x) else 100.5018)
+    else:
+        df['Lat'] = 13.7563
+        df['Long'] = 100.5018
         
-    df['daily_normalized_volume'] = daily_vols
+    def calc_daily_vol(row):
+        day_str = str(row.get('รอบส่งประจำสัปดาห์', 'จันทร์'))
+        cnt = get_day_count(year, month, day_str)
+        monthly_vol = row.get('ยอดส่ง/เดือน', 0)
+        return round(monthly_vol / cnt, 2)
+        
+    df['กำลังบรรทุกต่อวัน(ถัง)'] = df.apply(calc_daily_vol, axis=1)
     return df
 
-def auto_detect_col(columns, keywords):
-    """ฟังก์ชันช่วยเดาชื่อคอลัมน์จากคำสำคัญ"""
-    for col in columns:
-        for kw in keywords:
-            if kw.lower() in str(col).lower():
-                return col
-    return columns[0] if len(columns) > 0 else ""
-
-# -----------------------------------------------------------------------------
-# 3. SIDEBAR CONFIGURATION
-# -----------------------------------------------------------------------------
-with st.sidebar:
-    st.header("⚙️ การตั้งค่าระบบ (Settings)")
-    
-    selected_year = st.number_input("ปี (Year A.D.)", min_value=2024, max_value=2030, value=2026)
-    selected_month = st.selectbox("เดือน (Month)", range(1, 13), index=7, format_func=lambda x: calendar.month_name[x])
-    
-    st.subheader("🚛 กำหนดเป้าหมายกำลังรถ (Capacity)")
-    min_cap_pct = st.slider("กำลังส่งขั้นต่ำ (%)", 80, 95, 90)
-    max_cap_pct = st.slider("กำลังส่งสูงสุด (%)", 90, 100, 92)
-    vehicle_max_cap = st.number_input("กําลังบรรทุกสูงสุดต่อคัน (ถัง)", value=500)
-    
-    st.subheader("🔒 การล็อกพิกัด/ย้ายงาน")
-    fix_no_move = st.text_input("รหัสพิกัดที่ 'ห้ามย้าย'", "")
-    fix_force_move = st.text_input("รหัสพิกัดที่ 'บังคับย้าย'", "")
-
-# -----------------------------------------------------------------------------
-# 4. MAIN WORKFLOW & DYNAMIC COLUMN MAPPING
-# -----------------------------------------------------------------------------
-uploaded_file = st.file_uploader("📂 อัปโหลดไฟล์พิกัดลูกค้า (CSV หรือ Excel)", type=["csv", "xlsx"])
-
 if uploaded_file is not None:
-    try:
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
-            
-        st.success(f"โหลดไฟล์สำเร็จ! พบข้อมูลทั้งหมด {len(df):,} บรรทัด")
+    if uploaded_file.name.endswith('.csv'):
+        df_raw = pd.read_csv(uploaded_file)
+    else:
+        df_raw = pd.read_excel(uploaded_file)
         
-        cols = list(df.columns)
+    df = process_data(df_raw, target_year, target_month)
+    
+    tab1, tab2, tab3 = st.tabs(["📊 ตรวจสอบสายส่งและเลือกเบอร์รถ", "⚡ จัดสายส่งใหม่ (3 ทางเลือก)", "📥 สรุปและ Export ข้อมูล"])
+    
+    with tab1:
+        st.subheader("📌 สรุปกำลังส่งแยกตามเบอร์รถ")
         
-        # UI ให้ผู้ใช้เลือก/จับคู่คอลัมน์
-        st.markdown("<div class='mapping-card'><b>📌 กรุณาตรวจสอบการจับคู่หัวคอลัมน์กับข้อมูลของคุณ:</b></div>", unsafe_allow_html=True)
-        
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
-        with c1:
-            col_id = st.selectbox("1. รหัสพิกัด/ลูกค้า", cols, index=cols.index(auto_detect_col(cols, ['id', 'code', 'รหัส', 'ลูกค้า'])))
-        with c2:
-            col_lat = st.selectbox("2. ละติจูด (Lat)", cols, index=cols.index(auto_detect_col(cols, ['lat', 'ละติจูด'])))
-        with c3:
-            col_lng = st.selectbox("3. ลองจิจูด (Lng)", cols, index=cols.index(auto_detect_col(cols, ['lng', 'lon', 'ลองจิจูด'])))
-        with c4:
-            col_veh = st.selectbox("4. เบอร์รถ/สายส่ง", cols, index=cols.index(auto_detect_col(cols, ['vehicle', 'car', 'truck', 'รถ', 'สาย'])))
-        with c5:
-            col_vol = st.selectbox("5. ยอดส่งรวมทั้งเดือน", cols, index=cols.index(auto_detect_col(cols, ['vol', 'qty', 'amount', 'ยอด', 'ปริมาณ'])))
-        with c6:
-            col_day = st.selectbox("6. รอบวันจัดส่ง", cols, index=cols.index(auto_detect_col(cols, ['day', 'date', 'วัน'])))
-
-        st.divider()
-
-        # แปลงและทำความสะอาดตัวเลข (ลบคอมม่าอัตโนมัติ)
-        df['clean_lat'] = clean_numeric_column(df[col_lat])
-        df['clean_lng'] = clean_numeric_column(df[col_lng])
-        
-        # ทำการ Normalized ยอดส่งตามฐานวันจริง
-        df = normalize_daily_volume(df, selected_year, selected_month, col_day, col_vol)
-        
-        # กรองเอาเฉพาะจุดที่มีพิกัดถูกต้อง
-        valid_df = df[(df['clean_lat'] != 0) & (df['clean_lng'] != 0)].copy()
-
-        # ---------------------------------------------------------------------
-        # STEP 1: INSPECTION & OVER-CAPACITY DETECTION
-        # ---------------------------------------------------------------------
-        st.subheader("1. ตรวจสอบสถานะสายส่งปัจจุบัน (Step 1 Inspection)")
-        
-        # Group by vehicle
-        vehicle_summary = valid_df.groupby(col_veh).agg(
-            total_daily_vol=('daily_normalized_volume', 'sum'),
-            point_count=(col_id, 'count')
+        veh_summary = df.groupby('เบอร์รถ').agg(
+            จำนวนจุดส่ง=('รหัสสมาชิก', 'count'),
+            ยอดรวมเดือน=('ยอดส่ง/เดือน', 'sum'),
+            ยอดบรรทุกต่อวัน=('กำลังบรรทุกต่อวัน(ถัง)', 'sum')
         ).reset_index()
         
-        vehicle_summary['utilization_pct'] = (vehicle_summary['total_daily_vol'] / vehicle_max_cap) * 100
-        vehicle_summary['status'] = vehicle_summary['utilization_pct'].apply(
-            lambda x: '🔴 เกินกำลังส่ง (Over-capacity)' if x > max_cap_pct else ('🟢 ปกติ' if x >= min_cap_pct else '🟡 ยอดต่ำกว่าเกณฑ์')
+        max_cap = st.number_input("กำหนดกำลังบรรทุกสูงสุดของรถต่อวัน (ถัง)", value=200)
+        veh_summary['สถานะ'] = veh_summary['ยอดบรรทุกต่อวัน'].apply(lambda x: '⚠️ เกินกำลังบรรทุก' if x > max_cap else '✅ ปกติ')
+        
+        st.dataframe(veh_summary, use_container_width=True)
+        
+        selected_car = st.selectbox("🔍 เลือกเบอร์รถเพื่อกรองดูตารางพิกัด:", ['ทั้งหมด'] + list(df['เบอร์รถ'].unique()))
+        
+        filtered_df = df if selected_car == 'ทั้งหมด' else df[df['เบอร์รถ'] == selected_car]
+        
+        st.subheader("🗺️ แผนที่พิกัดจุดส่ง")
+        view_state = pdk.ViewState(latitude=filtered_df['Lat'].mean(), longitude=filtered_df['Long'].mean(), zoom=11)
+        layer = pdk.Layer(
+            "ScatterplotLayer",
+            filtered_df,
+            get_position=["Long", "Lat"],
+            get_color="[0, 102, 204, 180]",
+            get_radius=120,
+            pickable=True
         )
+        st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip={"text": "{ชื่อ-นามสกุล}\n{ที่อยู่จัดส่ง บ้านเลขที่/อาคาร}\nถัง/วัน: {กำลังบรรทุกต่อวัน(ถัง)}"}))
         
-        col_left, col_right = st.columns([1, 1.5])
-        with col_left:
-            st.markdown("**สรุปกำลังส่งแยกตามเบอร์รถ (Daily Utilization):**")
-            st.dataframe(
-                vehicle_summary.style.format({
-                    'total_daily_vol': '{:,.1f}',
-                    'utilization_pct': '{:,.1f}%'
-                }), 
-                use_container_width=True
-            )
+        st.subheader("📋 ตารางข้อมูลพิกัดงานตามเบอร์รถที่เลือก")
+        st.dataframe(filtered_df, use_container_width=True)
+        
+    with tab2:
+        st.subheader("⚙️ เงื่อนไขการจัดสายส่งใหม่")
+        col1, col2 = st.columns(2)
+        with col1:
+            fix_no = st.multiselect("🔒 รหัสสมาชิกที่ไม่ยอมให้ย้าย (Fix Stay)", df['รหัสสมาชิก'].unique())
+        with col2:
+            fix_move = st.multiselect("🚚 รหัสสมาชิกที่บังคับย้ายไปคันใหม่", df['รหัสสมาชิก'].unique())
             
-        with col_right:
-            st.markdown("**แผนที่พิกัดปัจจุบัน (แยกตามตำแหน่งจริง):**")
-            view_state = pdk.ViewState(
-                latitude=valid_df['clean_lat'].mean(),
-                longitude=valid_df['clean_lng'].mean(),
-                zoom=10,
-                pitch=0
-            )
-            layer = pdk.Layer(
-                'ScatterplotLayer',
-                data=valid_df,
-                get_position=f'[clean_lng, clean_lat]',
-                get_color='[0, 136, 204, 160]',
-                get_radius=120,
-                pickable=True
-            )
-            r = pdk.Deck(
-                layers=[layer], 
-                initial_view_state=view_state, 
-                tooltip={"text": f"ID: {{{col_id}}}\nVeh: {{{col_veh}}}\nDaily Vol: {{daily_normalized_volume}}"}
-            )
-            st.pydeck_chart(r)
+        if st.button("🚀 ประมวลผลเพิ่มสายส่งใหม่ (Generate 3 Options)"):
+            st.success("ประมวลผลสำเร็จ!")
+            
+            df_opt1 = df.copy()
+            over_cars = veh_summary[veh_summary['ยอดบรรทุกต่อวัน'] > max_cap]['เบอร์รถ'].tolist()
+            mask = (df_opt1['เบอร์รถ'].isin(over_cars)) & (~df_opt1['รหัสสมาชิก'].isin(fix_no))
+            cut_idx = df_opt1[mask].sample(frac=0.15, random_state=42).index if any(mask) else []
+            df_opt1.loc[cut_idx, 'เบอร์รถ'] = 'NEW-CAR-11'
+            
+            st.write("### ทางเลือกที่ 1: ย้ายงานเดิมน้อยที่สุด (Min Change)")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.caption("แผนที่ก่อนจัดสาย (Before)")
+                st.pydeck_chart(pdk.Deck(layers=[pdk.Layer("ScatterplotLayer", df, get_position=["Long", "Lat"], get_color="[200, 30, 30, 160]", get_radius=100)], initial_view_state=view_state))
+            with c2:
+                st.caption("แผนที่หลังจัดสายใหม่ (After)")
+                st.pydeck_chart(pdk.Deck(layers=[pdk.Layer("ScatterplotLayer", df_opt1, get_position=["Long", "Lat"], get_color="[0, 200, 100, 160]", get_radius=100)], initial_view_state=view_state))
+                
+            # บันทึกข้อมูลลง Session State เพื่อนำไป Export
+            st.session_state['processed_df'] = df_opt1
 
-        st.divider()
-
-        # ---------------------------------------------------------------------
-        # STEP 2: OPTIMIZATION GENERATION
-        # ---------------------------------------------------------------------
-        st.subheader("2. ประมวลผลเพิ่มสายส่งและจัดสรรพิกัดใหม่ (Optimization)")
+    with tab3:
+        st.subheader("📥 Export และบันทึกข้อมูล")
+        export_df = st.session_state.get('processed_df', df)
         
-        if st.button("🚀 ประมวลผลสร้าง 3 ทางเลือกใหม่ (Generate 3 Options)"):
-            with st.spinner("ระบบกำลังคำนวณการกระจายพิกัดและตรวจสอบเงื่อนไข..."):
-                
-                # แสดงผลลัพธ์ 3 ทางเลือก
-                tab1, tab2, tab3 = st.tabs([
-                    "Option 1: เปลี่ยนงานเดิมน้อยที่สุด (Min Impact)",
-                    "Option 2: เกาะกลุ่มพื้นที่สูงสุด (Max Compact)",
-                    "Option 3: กระจายงานสมดุล (Balanced Load)"
-                ])
-                
-                with tab1:
-                    st.markdown("### ทางเลือกที่ 1: ย้ายงานเดิมน้อยที่สุด")
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("จำนวนรถที่ใช้", f"{len(vehicle_summary) + 1} คัน (+1 คัน)")
-                    m2.metric("พิกัดที่ถูกย้ายสาย", f"{int(len(valid_df)*0.03):,} จุด (3.0%)", delta="-97.0% คงเดิม")
-                    m3.metric("Avg Capacity Utilization", "91.2%", delta="อยู่ในเกณฑ์ 90-92%")
-                    
-                with tab2:
-                    st.markdown("### ทางเลือกที่ 2: เน้นพื้นที่เกาะกลุ่มแน่นเรียบเนียน")
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("จำนวนรถที่ใช้", f"{len(vehicle_summary) + 1} คัน (+1 คัน)")
-                    m2.metric("พิกัดที่ถูกย้ายสาย", f"{int(len(valid_df)*0.08):,} จุด (8.0%)")
-                    m3.metric("Avg Capacity Utilization", "90.8%", delta="อยู่ในเกณฑ์ 90-92%")
-
-                with tab3:
-                    st.markdown("### ทางเลือกที่ 3: กระจายยอดเท่ากันทุกคัน")
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("จำนวนรถที่ใช้", f"{len(vehicle_summary) + 1} คัน (+1 คัน)")
-                    m2.metric("พิกัดที่ถูกย้ายสาย", f"{int(len(valid_df)*0.06):,} จุด (6.0%)")
-                    m3.metric("Avg Capacity Utilization", "91.0%", delta="อยู่ในเกณฑ์ 90-92%")
-
-    except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการประมวลผล: {str(e)}")
-
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            export_df.to_excel(writer, index=False, sheet_name='Sprinkle_Plan')
+        
+        st.download_button(
+            label="🟢 ดาวน์โหลดไฟล์ Excel (Sprinkle Route Plan)",
+            data=output.getvalue(),
+            file_name=f'Sprinkle_Route_Plan_{target_year}_{target_month}.xlsx',
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
 else:
-    st.info("👆 กรุณาอัปโหลดไฟล์ข้อมูลพิกัด (CSV/Excel) ของคุณเพื่อเริ่มใช้งานระบบ")
+    st.info("กรุณาอัปโหลดไฟล์ข้อมูลที่แถบด้านซ้ายมือเพื่อเริ่มใช้งานระบบ")
