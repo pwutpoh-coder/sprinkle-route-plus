@@ -2,5 +2,5 @@ streamlit
 pandas
 numpy
 pydeck
-ortools
+xlsxwriter
 openpyxl
