@@ -4,3 +4,4 @@ numpy
 pydeck
 xlsxwriter
 openpyxl
+matplotlib
