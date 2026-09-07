@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pydeck as pdk
 import calendar
 import io
 
@@ -28,23 +27,20 @@ def get_day_count(year, month, day_name):
     cnt = sum(1 for week in cal if week[target_idx] != 0)
     return cnt if cnt > 0 else 4
 
-# ฟังก์ชันสร้างสีประจำเบอร์รถ
+# ฟังก์ชันสร้างสีประจำเบอร์รถ (ใช้ HEX Code สำหรับ st.map)
 def assign_vehicle_colors(df):
     unique_cars = sorted(df['เบอร์รถ'].astype(str).unique())
-    base_palette = [
-        [31, 119, 180], [255, 127, 14], [44, 160, 44], [214, 39, 40],
-        [148, 103, 189], [140, 86, 75], [227, 119, 194], [127, 127, 127],
-        [188, 189, 34], [23, 190, 207], [255, 152, 150], [174, 199, 232]
+    base_palette_hex = [
+        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
+        '#9467bd', '#8c564b', '#e377c2', '#7f7f7f',
+        '#bcbd22', '#17becf', '#ff9896', '#aec7e8'
     ]
-    color_map = {}
     hex_map = {}
     for i, car in enumerate(unique_cars):
-        rgb = base_palette[i % len(base_palette)]
-        color_map[car] = rgb
-        hex_map[car] = f'#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}'
+        hex_map[car] = base_palette_hex[i % len(base_palette_hex)]
         
-    df['color_rgb'] = df['เบอร์รถ'].astype(str).map(color_map)
-    return df, color_map, hex_map
+    df['color'] = df['เบอร์รถ'].astype(str).map(hex_map)
+    return df, hex_map
 
 def process_data(df, year, month):
     if 'ยอดส่ง/เดือน' in df.columns:
@@ -70,11 +66,11 @@ def process_data(df, year, month):
             except:
                 return 100.5018
 
-        df['Lat'] = df['พิกัด Lat/Long'].apply(parse_lat)
-        df['Long'] = df['พิกัด Lat/Long'].apply(parse_long)
+        df['latitude'] = df['พิกัด Lat/Long'].apply(parse_lat)
+        df['longitude'] = df['พิกัด Lat/Long'].apply(parse_long)
     else:
-        df['Lat'] = 13.7563
-        df['Long'] = 100.5018
+        df['latitude'] = 13.7563
+        df['longitude'] = 100.5018
 
     def calc_daily_vol(row):
         day_str = str(row.get('รอบส่งประจำสัปดาห์', 'จันทร์')).strip()
@@ -83,8 +79,8 @@ def process_data(df, year, month):
         return round(monthly_vol / cnt, 2) if cnt > 0 else round(monthly_vol / 4, 2)
 
     df['ยอดส่งเฉลี่ยต่อวัน_พิกัด'] = df.apply(calc_daily_vol, axis=1)
-    df, color_map, hex_map = assign_vehicle_colors(df)
-    return df, color_map, hex_map
+    df, hex_map = assign_vehicle_colors(df)
+    return df, hex_map
 
 def calculate_vehicle_utilization(df, year, month):
     summary_list = []
@@ -119,7 +115,7 @@ if uploaded_file is not None:
         else:
             df_raw = pd.read_excel(uploaded_file)
             
-        df, color_map, hex_map = process_data(df_raw, target_year, target_month)
+        df, hex_map = process_data(df_raw, target_year, target_month)
         
         tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่สีพิกัด", "⚡ จัดสายส่งใหม่ (3 ทางเลือก)", "📥 สรุปและ Export ข้อมูล"])
         
@@ -133,35 +129,20 @@ if uploaded_file is not None:
             st.dataframe(veh_summary, use_container_width=True)
             
             st.divider()
-            st.subheader("🗺️ แผนที่พิกัดส่งน้ำดื่ม (พร้อมถนนและสถานที่)")
+            st.subheader("🗺️ แผนที่ตำแหน่งส่งน้ำดื่ม (สว่างเห็นเส้นถนนชัดเจน)")
             
             selected_car = st.selectbox("🔍 เลือกเบอร์รถเพื่อกรองดูตำแหน่ง:", ['ทั้งหมด'] + list(df['เบอร์รถ'].unique()))
             filtered_df = df if selected_car == 'ทั้งหมด' else df[df['เบอร์รถ'] == selected_car]
             
-            view_state = pdk.ViewState(
-                latitude=filtered_df['Lat'].mean(),
-                longitude=filtered_df['Long'].mean(),
+            # ใช้ st.map ซึ่งดึงภาพแผนที่ฐานมาตรฐานมาแสดงแน่นอน 100%
+            st.map(
+                filtered_df,
+                latitude='latitude',
+                longitude='longitude',
+                color='color',
+                size=25,
                 zoom=11
             )
-            
-            layer = pdk.Layer(
-                "ScatterplotLayer",
-                filtered_df,
-                get_position=["Long", "Lat"],
-                get_color="color_rgb",
-                get_radius=150,
-                pickable=True,
-                opacity=0.85
-            )
-            
-            # ใช้ carto-positron (Light Map ที่มีถนนและสถานที่ชัดเจน 100% โดยไม่ต้องใช้ Token)
-            st.pydeck_chart(pdk.Deck(
-                map_provider="carto",
-                map_style="positron",
-                layers=[layer],
-                initial_view_state=view_state,
-                tooltip={"text": "รหัส: {รหัสสมาชิก}\nลูกค้า: {ชื่อ-นามสกุล}\nเบอร์รถ: {เบอร์รถ}\nที่อยู่: {ที่อยู่จัดส่ง บ้านเลขที่/อาคาร}\nยอด/เดือน: {ยอดส่ง/เดือน} ถัง"}
-            ))
             
             st.write("🎨 **ป้ายสัญลักษณ์สีกำกับเบอร์รถ (Vehicle Color Legend):**")
             legend_cols = st.columns(min(len(hex_map), 6))
@@ -195,21 +176,21 @@ if uploaded_file is not None:
                     mask1 = mask1 | (df_opt1['รหัสสมาชิก'].isin(fix_move))
                 cut_idx1 = df_opt1[mask1].sample(frac=0.15, random_state=42).index if any(mask1) else []
                 df_opt1.loc[cut_idx1, 'เบอร์รถ'] = 'NEW-CAR-11'
-                df_opt1, _, _ = assign_vehicle_colors(df_opt1)
+                df_opt1, _ = assign_vehicle_colors(df_opt1)
                 
                 # OPTION 2
                 df_opt2 = df.copy()
                 mask2 = (df_opt2['เบอร์รถ'].isin(over_vehicles)) & (~df_opt2['รหัสสมาชิก'].isin(fix_no))
                 cut_idx2 = df_opt2[mask2].sample(frac=0.25, random_state=101).index if any(mask2) else []
                 df_opt2.loc[cut_idx2, 'เบอร์รถ'] = 'NEW-CAR-11'
-                df_opt2, _, _ = assign_vehicle_colors(df_opt2)
+                df_opt2, _ = assign_vehicle_colors(df_opt2)
 
                 # OPTION 3
                 df_opt3 = df.copy()
                 mask3 = (~df_opt3['รหัสสมาชิก'].isin(fix_no))
                 cut_idx3 = df_opt3[mask3].sample(frac=0.20, random_state=2024).index if any(mask3) else []
                 df_opt3.loc[cut_idx3, 'เบอร์รถ'] = 'NEW-CAR-11'
-                df_opt3, _, _ = assign_vehicle_colors(df_opt3)
+                df_opt3, _ = assign_vehicle_colors(df_opt3)
 
                 st.success("คำนวณสำเร็จ! แสดงผลลัพธ์ครบทั้ง 3 ทางเลือกด้านล่าง:")
 
@@ -225,8 +206,7 @@ if uploaded_file is not None:
                     st.dataframe(sum1, use_container_width=True)
                     
                     st.caption("🗺️ แผนที่สายส่งใหม่ (Option 1)")
-                    layer1 = pdk.Layer("ScatterplotLayer", df_opt1, get_position=["Long", "Lat"], get_color="color_rgb", get_radius=150, pickable=True)
-                    st.pydeck_chart(pdk.Deck(map_provider="carto", map_style="positron", layers=[layer1], initial_view_state=view_state))
+                    st.map(df_opt1, latitude='latitude', longitude='longitude', color='color', size=25)
                     
                     if st.button("เลือกทางเลือกที่ 1 สำหรับ Export"):
                         st.session_state['selected_option_df'] = df_opt1
@@ -238,8 +218,7 @@ if uploaded_file is not None:
                     st.dataframe(sum2, use_container_width=True)
                     
                     st.caption("🗺️ แผนที่สายส่งใหม่ (Option 2)")
-                    layer2 = pdk.Layer("ScatterplotLayer", df_opt2, get_position=["Long", "Lat"], get_color="color_rgb", get_radius=150, pickable=True)
-                    st.pydeck_chart(pdk.Deck(map_provider="carto", map_style="positron", layers=[layer2], initial_view_state=view_state))
+                    st.map(df_opt2, latitude='latitude', longitude='longitude', color='color', size=25)
                     
                     if st.button("เลือกทางเลือกที่ 2 สำหรับ Export"):
                         st.session_state['selected_option_df'] = df_opt2
@@ -251,8 +230,7 @@ if uploaded_file is not None:
                     st.dataframe(sum3, use_container_width=True)
                     
                     st.caption("🗺️ แผนที่สายส่งใหม่ (Option 3)")
-                    layer3 = pdk.Layer("ScatterplotLayer", df_opt3, get_position=["Long", "Lat"], get_color="color_rgb", get_radius=150, pickable=True)
-                    st.pydeck_chart(pdk.Deck(map_provider="carto", map_style="positron", layers=[layer3], initial_view_state=view_state))
+                    st.map(df_opt3, latitude='latitude', longitude='longitude', color='color', size=25)
                     
                     if st.button("เลือกทางเลือกที่ 3 สำหรับ Export"):
                         st.session_state['selected_option_df'] = df_opt3
@@ -266,7 +244,7 @@ if uploaded_file is not None:
             
             final_export_df = st.session_state.get('selected_option_df', df)
             
-            cols_to_drop = ['Lat', 'Long', 'color_rgb', 'ยอดส่งเฉลี่ยต่อวัน_พิกัด']
+            cols_to_drop = ['latitude', 'longitude', 'color', 'ยอดส่งเฉลี่ยต่อวัน_พิกัด']
             clean_export_df = final_export_df.drop(columns=[c for c in cols_to_drop if c in final_export_df.columns])
 
             output = io.BytesIO()
