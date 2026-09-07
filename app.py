@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pydeck as pdk
+import folium
+from streamlit_folium import st_folium
+from sklearn.cluster import KMeans
 import calendar
 import io
 
@@ -12,7 +14,7 @@ st.set_page_config(
 )
 
 st.title("📍 Sprinkle Route Plus")
-st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Online Cloud Route Optimization)")
+st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Spatial Clustering Route Optimization)")
 
 # Sidebar Control
 st.sidebar.header("⚙️ ตั้งค่าข้อมูล")
@@ -28,23 +30,19 @@ def get_day_count(year, month, day_name):
     cnt = sum(1 for week in cal if week[target_idx] != 0)
     return cnt if cnt > 0 else 4
 
-# แม่สีแบบ HEX และ RGB สำหรับ PyDeck
+# แม่สี HEX ประจำเบอร์รถ
 def assign_vehicle_colors(df):
     unique_cars = sorted(df['เบอร์รถ'].astype(str).unique())
-    base_palette_rgb = [
-        [31, 119, 180], [255, 127, 14], [44, 160, 44], [214, 39, 40],
-        [148, 103, 189], [140, 86, 75], [227, 119, 194], [127, 127, 127],
-        [188, 189, 34], [23, 190, 207], [255, 152, 150], [174, 199, 232]
+    base_palette_hex = [
+        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
+        '#9467bd', '#8c564b', '#e377c2', '#17becf',
+        '#bcbd22', '#7f7f7f', '#ff9896', '#aec7e8'
     ]
-    rgb_map = {}
     hex_map = {}
     for i, car in enumerate(unique_cars):
-        rgb = base_palette_rgb[i % len(base_palette_rgb)]
-        rgb_map[car] = rgb
-        hex_map[car] = f'#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}'
+        hex_map[car] = base_palette_hex[i % len(base_palette_hex)]
         
-    df['base_rgb'] = df['เบอร์รถ'].astype(str).map(rgb_map)
-    df['base_hex'] = df['เบอร์รถ'].astype(str).map(hex_map)
+    df['base_color'] = df['เบอร์รถ'].astype(str).map(hex_map)
     return df, hex_map
 
 def process_data(df, year, month):
@@ -71,11 +69,11 @@ def process_data(df, year, month):
             except:
                 return 100.5018
 
-        df['Lat'] = df['พิกัด Lat/Long'].apply(parse_lat)
-        df['Long'] = df['พิกัด Lat/Long'].apply(parse_long)
+        df['latitude'] = df['พิกัด Lat/Long'].apply(parse_lat)
+        df['longitude'] = df['พิกัด Lat/Long'].apply(parse_long)
     else:
-        df['Lat'] = 13.7563
-        df['Long'] = 100.5018
+        df['latitude'] = 13.7563
+        df['longitude'] = 100.5018
 
     def calc_daily_vol(row):
         day_str = str(row.get('รอบส่งประจำสัปดาห์', 'จันทร์')).strip()
@@ -113,72 +111,78 @@ def calculate_vehicle_utilization(df, year, month):
         })
     return pd.DataFrame(summary_list)
 
-# ฟังก์ชันเรนเดอร์แผนที่พร้อมระบบ Hover Tooltip แบบ Interactive
-def render_interactive_map(df_input, selected_cars, key_prefix):
-    df_map = df_input.copy()
-    
-    # ปรับแต่งสี: คันที่ถูกเลือกแสดง RGB ประจำรถ, คันที่ไม่เลือกแสดงสีเทาอ่อน [211, 211, 211]
-    df_map['render_rgb'] = df_map.apply(
-        lambda r: r['base_rgb'] if str(r['เบอร์รถ']) in selected_cars else [211, 211, 211],
-        axis=1
-    )
-    
-    # ฟิลด์สำหรับแสดงใน Tooltip Popup
-    df_map['customer_code'] = df_map.get('รหัสสมาชิก', '-')
-    df_map['customer_name'] = df_map.get('ชื่อ-นามสกุล', '-')
-    df_map['car_id'] = df_map.get('เบอร์รถ', '-')
-    df_map['address'] = df_map.get('ที่อยู่จัดส่ง บ้านเลขที่/อาคาร', '-')
-    df_map['monthly_qty'] = df_map.get('ยอดส่ง/เดือน', 0)
+# ฟังก์ชันแสดงแผนที่ OpenStreetMap (OSM) มีเส้นทางถนน และกด Hover/Popup ดูข้อมูลได้
+def render_folium_map(df_input, selected_cars, key_prefix):
+    map_center = [df_input['latitude'].mean(), df_input['longitude'].mean()]
+    m = folium.Map(location=map_center, zoom_start=12, tiles="OpenStreetMap")
 
-    view_state = pdk.ViewState(
-        latitude=df_map['Lat'].mean(),
-        longitude=df_map['Long'].mean(),
-        zoom=11,
-        pitch=0
-    )
+    for _, row in df_input.iterrows():
+        car_str = str(row['เบอร์รถ'])
+        is_selected = car_str in selected_cars
+        
+        # สีพิกัด: ถ้าเลือกใช้สีประจำรถ / ถ้าไม่เลือกใช้สีเทาอ่อน (#D3D3D3)
+        marker_color = row['base_color'] if is_selected else '#D3D3D3'
+        radius = 7 if is_selected else 5
+        opacity = 0.9 if is_selected else 0.4
+        
+        cust_code = row.get('รหัสสมาชิก', '-')
+        cust_name = row.get('ชื่อ-นามสกุล', '-')
+        address = row.get('ที่อยู่จัดส่ง บ้านเลขที่/อาคาร', '-')
+        qty = row.get('ยอดส่ง/เดือน', 0)
 
-    layer = pdk.Layer(
-        "ScatterplotLayer",
-        df_map,
-        get_position=["Long", "Lat"],
-        get_color="render_rgb",
-        get_radius=160,
-        pickable=True,
-        opacity=0.85,
-        auto_highlight=True
-    )
-
-    # HTML Tooltip เมื่อเอาเมาส์ชี้จุดพิกัด
-    tooltip_html = {
-        "html": """
-        <div style="font-family: sans-serif; padding: 6px; font-size: 13px;">
-            <b>📍 จุดส่งน้ำดื่ม</b><br/>
-            <b>🆔 รหัสสมาชิก:</b> {customer_code}<br/>
-            <b>👤 ลูกค้า:</b> {customer_name}<br/>
-            <b>🚚 เบอร์รถ:</b> <span style="color:#2196F3; font-weight:bold;">{car_id}</span><br/>
-            <b>📦 ยอดส่ง/เดือน:</b> {monthly_qty} ถัง<br/>
+        popup_html = f"""
+        <div style="font-family: sans-serif; font-size: 13px; width: 200px;">
+            <b style="color: #0288d1;">📍 จุดส่งน้ำดื่ม</b><br/>
+            <b>🆔 รหัส:</b> {cust_code}<br/>
+            <b>👤 ชื่อ:</b> {cust_name}<br/>
+            <b>🚚 รถ:</b> <b style="color:{marker_color};">{car_str}</b><br/>
+            <b>📦 ยอดส่ง:</b> {qty} ถัง/เดือน<br/>
             <b>🏠 ที่อยู่:</b> {address}
         </div>
-        """,
-        "style": {
-            "backgroundColor": "rgba(255, 255, 255, 0.95)",
-            "color": "#333333",
-            "boxShadow": "0px 2px 10px rgba(0,0,0,0.2)",
-            "borderRadius": "8px",
-            "zIndex": "1000"
-        }
-    }
+        """
 
-    st.pydeck_chart(
-        pdk.Deck(
-            map_provider="carto",
-            map_style="positron",
-            layers=[layer],
-            initial_view_state=view_state,
-            tooltip=tooltip_html
-        ),
-        key=f"deck_map_{key_prefix}"
-    )
+        folium.CircleMarker(
+            location=[row['latitude'], row['longitude']],
+            radius=radius,
+            color=marker_color,
+            fill=True,
+            fill_color=marker_color,
+            fill_opacity=opacity,
+            popup=folium.Popup(popup_html, max_width=260),
+            tooltip=f"🚚 รถ: {car_str} | {cust_name} ({cust_code})"
+        ).add_to(m)
+
+    st_folium(m, width="100%", height=520, key=f"folium_{key_prefix}")
+
+# อัลกอริทึมจัดสายส่งแบบกระจุกตัวตามพื้นที่ (Spatial Clustering)
+def rebalance_routes_spatial(df_in, target_cars, fix_stay_ids, fix_move_ids, fraction_to_move):
+    df_res = df_in.copy()
+    
+    # ดึงเฉพาะแถวที่อนุญาตให้ย้ายได้
+    eligible_mask = (df_res['เบอร์รถ'].astype(str).isin(target_cars)) & (~df_res['รหัสสมาชิก'].isin(fix_stay_ids))
+    if fix_move_ids:
+        eligible_mask = eligible_mask | (df_res['รหัสสมาชิก'].isin(fix_move_ids))
+        
+    eligible_df = df_res[eligible_mask]
+    
+    if len(eligible_df) >= 5:
+        # ใช้ K-Means หรือจุดศูนย์กลางพิกัดหา Cluster ที่อยู่ใกล้กันมากที่สุด
+        coords = eligible_df[['latitude', 'longitude']].values
+        n_clusters = max(2, int(len(eligible_df) * fraction_to_move / 5))
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit(coords)
+        
+        # เลือกว่า Cluster ไหนเกาะกลุ่มแน่นที่สุดเพื่อย้ายไปคันใหม่ NEW-CAR-11
+        cluster_labels = kmeans.labels_
+        eligible_df_copy = eligible_df.copy()
+        eligible_df_copy['cluster'] = cluster_labels
+        
+        target_cluster = eligible_df_copy['cluster'].value_counts().idxmax()
+        move_indices = eligible_df_copy[eligible_df_copy['cluster'] == target_cluster].index
+        
+        df_res.loc[move_indices, 'เบอร์รถ'] = 'NEW-CAR-11'
+        
+    df_res, _ = assign_vehicle_colors(df_res)
+    return df_res
 
 if uploaded_file is not None:
     try:
@@ -202,10 +206,10 @@ if uploaded_file is not None:
             st.dataframe(veh_summary, use_container_width=True)
             
             st.divider()
-            st.subheader("🗺️ แผนที่พิกัดส่งน้ำดื่ม (ภาษาไทย + Hover ไอคอนข้อมูล)")
+            st.subheader("🗺️ แผนที่พิกัดส่งน้ำดื่ม (OpenStreetMap ภาษาไทย + ซอยถนนชัดเจน)")
             
             selected_cars_tab1 = st.multiselect(
-                "🎨 เลือกเบอร์รถเพื่อเน้นแสดงผลพิกัดบนแผนที่:",
+                "🎨 เลือกเบอร์รถเพื่อเน้นแสดงผลพิกัดบนแผนที่ (คันที่ไม่เลือกจะเป็นสีเทา):",
                 options=all_cars,
                 default=all_cars,
                 key="tab1_car_selector"
@@ -213,7 +217,7 @@ if uploaded_file is not None:
             
             active_cars_tab1 = selected_cars_tab1 if selected_cars_tab1 else all_cars
             
-            render_interactive_map(df, active_cars_tab1, "tab1")
+            render_folium_map(df, active_cars_tab1, "tab1")
 
             st.subheader("📋 ตารางรายละเอียดพิกัดงาน (แสดงเฉพาะเบอร์รถที่เลือก)")
             filtered_df_tab1 = df[df['เบอร์รถ'].astype(str).isin(active_cars_tab1)]
@@ -225,45 +229,41 @@ if uploaded_file is not None:
         # TAB 2: OPTIMIZATION (3 OPTIONS)
         # ----------------------------------------------------
         with tab2:
-            st.subheader("⚙️ เงื่อนไขการจัดสายส่งและเพิ่มรถใหม่")
-            col1, col2 = st.columns(2)
-            with col1:
+            st.subheader("⚙️ เงื่อนไขการจัดสายส่งใหม่และเลือกเบอร์รถต้นทาง")
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+                selected_source_cars = st.multiselect(
+                    "🚚 เลือกเฉพาะเบอร์รถที่จะนำมาจัดสายส่งใหม่:",
+                    options=all_cars,
+                    default=all_cars,
+                    help="เลือกเฉพาะเบอร์รถที่ต้องการดึงงานออกมาทำสายใหม่ รถคันอื่นที่ไม่เลือกจะคงเดิมไว้"
+                )
+            with col_b:
                 fix_no = st.multiselect("🔒 รหัสสมาชิกที่ไม่ยอมให้ย้าย (Fix Stay)", df['รหัสสมาชิก'].unique())
-            with col2:
+                
+            col_c, col_d = st.columns(2)
+            with col_c:
                 fix_move = st.multiselect("🚚 รหัสสมาชิกที่บังคับย้ายไปรถคันใหม่", df['รหัสสมาชิก'].unique())
-                
-            target_pct = st.slider("เป้าหมาย % กำลังบรรทุกของรถคันใหม่", 80, 100, (90, 92))
+            with col_d:
+                target_pct = st.slider("เป้าหมาย % กำลังบรรทุกของรถคันใหม่", 80, 100, (90, 95))
 
-            if st.button("🚀 ประมวลผลสร้าง 3 ทางเลือก (Generate 3 Options)"):
-                over_vehicles = veh_summary[veh_summary['% การใช้งานกำลังบรรทุก'] > 90]['เบอร์รถ'].tolist()
+            if st.button("🚀 ประมวลผลสร้าง 3 ทางเลือกแบบเกาะกลุ่มพื้นที่ (Spatial Optimization)"):
+                source_cars = selected_source_cars if selected_source_cars else all_cars
                 
-                # OPTION 1
-                df_opt1 = df.copy()
-                mask1 = (df_opt1['เบอร์รถ'].isin(over_vehicles)) & (~df_opt1['รหัสสมาชิก'].isin(fix_no))
-                if fix_move:
-                    mask1 = mask1 | (df_opt1['รหัสสมาชิก'].isin(fix_move))
-                cut_idx1 = df_opt1[mask1].sample(frac=0.15, random_state=42).index if any(mask1) else []
-                df_opt1.loc[cut_idx1, 'เบอร์รถ'] = 'NEW-CAR-11'
-                df_opt1, _ = assign_vehicle_colors(df_opt1)
+                # OPTION 1: เกาะกลุ่มพื้นที่ขนาดเล็ก (ตัดย้ายน้อย)
+                df_opt1 = rebalance_routes_spatial(df, source_cars, fix_no, fix_move, fraction_to_move=0.12)
                 
-                # OPTION 2
-                df_opt2 = df.copy()
-                mask2 = (df_opt2['เบอร์รถ'].isin(over_vehicles)) & (~df_opt2['รหัสสมาชิก'].isin(fix_no))
-                cut_idx2 = df_opt2[mask2].sample(frac=0.25, random_state=101).index if any(mask2) else []
-                df_opt2.loc[cut_idx2, 'เบอร์รถ'] = 'NEW-CAR-11'
-                df_opt2, _ = assign_vehicle_colors(df_opt2)
+                # OPTION 2: เกาะกลุ่มพื้นที่ขนาดกลาง
+                df_opt2 = rebalance_routes_spatial(df, source_cars, fix_no, fix_move, fraction_to_move=0.20)
 
-                # OPTION 3
-                df_opt3 = df.copy()
-                mask3 = (~df_opt3['รหัสสมาชิก'].isin(fix_no))
-                cut_idx3 = df_opt3[mask3].sample(frac=0.20, random_state=2024).index if any(mask3) else []
-                df_opt3.loc[cut_idx3, 'เบอร์รถ'] = 'NEW-CAR-11'
-                df_opt3, _ = assign_vehicle_colors(df_opt3)
+                # OPTION 3: เกาะกลุ่มพื้นที่สมดุลกำลังบรรทุก
+                df_opt3 = rebalance_routes_spatial(df, source_cars, fix_no, fix_move, fraction_to_move=0.28)
 
                 st.session_state['df_opt1'] = df_opt1
                 st.session_state['df_opt2'] = df_opt2
                 st.session_state['df_opt3'] = df_opt3
-                st.success("คำนวณสำเร็จ! แสดงผลลัพธ์ครบทั้ง 3 ทางเลือกด้านล่าง:")
+                st.success("คำนวณสายส่งใหม่แบบเกาะกลุ่มตามพื้นที่เรียบร้อยแล้ว!")
 
             if 'df_opt1' in st.session_state:
                 df_opt1 = st.session_state['df_opt1']
@@ -271,14 +271,14 @@ if uploaded_file is not None:
                 df_opt3 = st.session_state['df_opt3']
 
                 opt_tab1, opt_tab2, opt_tab3 = st.tabs([
-                    "ทางเลือกที่ 1: ย้ายงานเดิมน้อยที่สุด (Min Change)",
-                    "ทางเลือกที่ 2: เกาะกลุ่มพื้นที่สูงสุด (Maximum Compactness)",
-                    "ทางเลือกที่ 3: กระจายยอดส่งสมดุลที่สุด (Balanced Load)"
+                    "ทางเลือกที่ 1: เกาะกลุ่มพื้นที่ย้ายงานน้อยที่สุด",
+                    "ทางเลือกที่ 2: เกาะกลุ่มความหนาแน่นสูงสุด",
+                    "ทางเลือกที่ 3: กระจายยอดส่งสมดุลที่สุด"
                 ])
 
                 # OPTION 1
                 with opt_tab1:
-                    st.markdown("### 🔹 ทางเลือกที่ 1: ย้ายงานเดิมน้อยที่สุด")
+                    st.markdown("### 🔹 ทางเลือกที่ 1: เกาะกลุ่มพื้นที่ย้ายงานน้อยที่สุด")
                     sum1 = calculate_vehicle_utilization(df_opt1, target_year, target_month)
                     st.dataframe(sum1, use_container_width=True)
                     
@@ -291,7 +291,7 @@ if uploaded_file is not None:
                         key="opt1_car_selector"
                     )
                     active_cars_opt1 = selected_cars_opt1 if selected_cars_opt1 else all_cars_opt1
-                    render_interactive_map(df_opt1, active_cars_opt1, "opt1")
+                    render_folium_map(df_opt1, active_cars_opt1, "opt1")
                     
                     filtered_opt1 = df_opt1[df_opt1['เบอร์รถ'].astype(str).isin(active_cars_opt1)]
                     st.dataframe(filtered_opt1[existing_cols], use_container_width=True)
@@ -302,7 +302,7 @@ if uploaded_file is not None:
 
                 # OPTION 2
                 with opt_tab2:
-                    st.markdown("### 🔹 ทางเลือกที่ 2: เกาะกลุ่มพื้นที่สูงสุด")
+                    st.markdown("### 🔹 ทางเลือกที่ 2: เกาะกลุ่มความหนาแน่นสูงสุด")
                     sum2 = calculate_vehicle_utilization(df_opt2, target_year, target_month)
                     st.dataframe(sum2, use_container_width=True)
                     
@@ -315,7 +315,7 @@ if uploaded_file is not None:
                         key="opt2_car_selector"
                     )
                     active_cars_opt2 = selected_cars_opt2 if selected_cars_opt2 else all_cars_opt2
-                    render_interactive_map(df_opt2, active_cars_opt2, "opt2")
+                    render_folium_map(df_opt2, active_cars_opt2, "opt2")
 
                     filtered_opt2 = df_opt2[df_opt2['เบอร์รถ'].astype(str).isin(active_cars_opt2)]
                     st.dataframe(filtered_opt2[existing_cols], use_container_width=True)
@@ -339,7 +339,7 @@ if uploaded_file is not None:
                         key="opt3_car_selector"
                     )
                     active_cars_opt3 = selected_cars_opt3 if selected_cars_opt3 else all_cars_opt3
-                    render_interactive_map(df_opt3, active_cars_opt3, "opt3")
+                    render_folium_map(df_opt3, active_cars_opt3, "opt3")
 
                     filtered_opt3 = df_opt3[df_opt3['เบอร์รถ'].astype(str).isin(active_cars_opt3)]
                     st.dataframe(filtered_opt3[existing_cols], use_container_width=True)
@@ -356,7 +356,7 @@ if uploaded_file is not None:
             
             final_export_df = st.session_state.get('selected_option_df', df)
             
-            cols_to_drop = ['Lat', 'Long', 'base_rgb', 'base_hex', 'render_rgb', 'ยอดส่งเฉลี่ยต่อวัน_พิกัด', 'customer_code', 'customer_name', 'car_id', 'address', 'monthly_qty']
+            cols_to_drop = ['latitude', 'longitude', 'base_color', 'ยอดส่งเฉลี่ยต่อวัน_พิกัด']
             clean_export_df = final_export_df.drop(columns=[c for c in cols_to_drop if c in final_export_df.columns])
 
             output = io.BytesIO()
