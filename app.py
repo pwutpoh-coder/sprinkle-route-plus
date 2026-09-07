@@ -44,13 +44,20 @@ st.caption("ระบบบริหารจัดการและเพิ�
 st.divider()
 
 # -----------------------------------------------------------------------------
-# 2. HELPER FUNCTIONS
+# 2. HELPER FUNCTIONS & STRING CLEANER
 # -----------------------------------------------------------------------------
+def clean_numeric_column(series):
+    """ฟังก์ชันแปลงค่าตัวเลขที่มีเครื่องหมายคอมม่า (,) หรือข้อความ ให้เป็น float ที่คำนวณได้"""
+    return pd.to_numeric(
+        series.astype(str).str.replace(',', '', regex=False).str.strip(), 
+        errors='coerce'
+    ).fillna(0)
+
 def get_days_in_month(year, month, day_of_week):
     """คำนวณจำนวนวันที่เกิดขึ้นจริงในเดือน"""
     cal = calendar.monthcalendar(year, month)
     count = sum(1 for week in cal if week[day_of_week] != 0)
-    return count if count > 0 else 4  # Default to 4 if error
+    return count if count > 0 else 4
 
 def normalize_daily_volume(df, target_year, target_month, col_day, col_vol):
     """แปลงยอดส่งรวมทั้งเดือน ให้เป็น Daily Normalized Capacity ที่แม่นยำ"""
@@ -58,9 +65,11 @@ def normalize_daily_volume(df, target_year, target_month, col_day, col_vol):
                 'จันทร์': 0, 'อังคาร': 1, 'พุธ': 2, 'พฤหัส': 3, 'ศุกร์': 4, 'เสาร์': 5, 'อาทิตย์': 6}
     
     daily_vols = []
+    # แปลงยอดส่งให้เป็นตัวเลขที่สะอาดก่อน
+    clean_vol_series = clean_numeric_column(df[col_vol])
+    
     for idx, row in df.iterrows():
         day_val = str(row.get(col_day, 'Mon')).strip().lower()
-        # หาเลขวันจากดิกชันนารี
         day_num = 0
         for k, v in days_map.items():
             if k in day_val:
@@ -68,7 +77,7 @@ def normalize_daily_volume(df, target_year, target_month, col_day, col_vol):
                 break
                 
         actual_days = get_days_in_month(target_year, target_month, day_num)
-        monthly_vol = float(row.get(col_vol, 0)) if pd.notnull(row.get(col_vol, 0)) else 0
+        monthly_vol = clean_vol_series.iloc[idx]
         daily_vol = monthly_vol / actual_days if actual_days > 0 else monthly_vol
         daily_vols.append(daily_vol)
         
@@ -136,13 +145,15 @@ if uploaded_file is not None:
 
         st.divider()
 
+        # แปลงและทำความสะอาดตัวเลข (ลบคอมม่าอัตโนมัติ)
+        df['clean_lat'] = clean_numeric_column(df[col_lat])
+        df['clean_lng'] = clean_numeric_column(df[col_lng])
+        
         # ทำการ Normalized ยอดส่งตามฐานวันจริง
         df = normalize_daily_volume(df, selected_year, selected_month, col_day, col_vol)
         
-        # Clean Data
-        df[col_lat] = pd.to_numeric(df[col_lat], errors='coerce')
-        df[col_lng] = pd.to_numeric(df[col_lng], errors='coerce')
-        df = df.dropna(subset=[col_lat, col_lng])
+        # กรองเอาเฉพาะจุดที่มีพิกัดถูกต้อง
+        valid_df = df[(df['clean_lat'] != 0) & (df['clean_lng'] != 0)].copy()
 
         # ---------------------------------------------------------------------
         # STEP 1: INSPECTION & OVER-CAPACITY DETECTION
@@ -150,7 +161,7 @@ if uploaded_file is not None:
         st.subheader("1. ตรวจสอบสถานะสายส่งปัจจุบัน (Step 1 Inspection)")
         
         # Group by vehicle
-        vehicle_summary = df.groupby(col_veh).agg(
+        vehicle_summary = valid_df.groupby(col_veh).agg(
             total_daily_vol=('daily_normalized_volume', 'sum'),
             point_count=(col_id, 'count')
         ).reset_index()
@@ -174,15 +185,15 @@ if uploaded_file is not None:
         with col_right:
             st.markdown("**แผนที่พิกัดปัจจุบัน (แยกตามตำแหน่งจริง):**")
             view_state = pdk.ViewState(
-                latitude=df[col_lat].mean(),
-                longitude=df[col_lng].mean(),
+                latitude=valid_df['clean_lat'].mean(),
+                longitude=valid_df['clean_lng'].mean(),
                 zoom=10,
                 pitch=0
             )
             layer = pdk.Layer(
                 'ScatterplotLayer',
-                data=df,
-                get_position=f'[{col_lng}, {col_lat}]',
+                data=valid_df,
+                get_position=f'[clean_lng, clean_lat]',
                 get_color='[0, 136, 204, 160]',
                 get_radius=120,
                 pickable=True
@@ -215,26 +226,25 @@ if uploaded_file is not None:
                     st.markdown("### ทางเลือกที่ 1: ย้ายงานเดิมน้อยที่สุด")
                     m1, m2, m3 = st.columns(3)
                     m1.metric("จำนวนรถที่ใช้", f"{len(vehicle_summary) + 1} คัน (+1 คัน)")
-                    m2.metric("พิกัดที่ถูกย้ายสาย", f"{int(len(df)*0.03):,} จุด (3.0%)", delta="-97.0% คงเดิม")
+                    m2.metric("พิกัดที่ถูกย้ายสาย", f"{int(len(valid_df)*0.03):,} จุด (3.0%)", delta="-97.0% คงเดิม")
                     m3.metric("Avg Capacity Utilization", "91.2%", delta="อยู่ในเกณฑ์ 90-92%")
                     
                 with tab2:
                     st.markdown("### ทางเลือกที่ 2: เน้นพื้นที่เกาะกลุ่มแน่นเรียบเนียน")
                     m1, m2, m3 = st.columns(3)
                     m1.metric("จำนวนรถที่ใช้", f"{len(vehicle_summary) + 1} คัน (+1 คัน)")
-                    m2.metric("พิกัดที่ถูกย้ายสาย", f"{int(len(df)*0.08):,} จุด (8.0%)")
+                    m2.metric("พิกัดที่ถูกย้ายสาย", f"{int(len(valid_df)*0.08):,} จุด (8.0%)")
                     m3.metric("Avg Capacity Utilization", "90.8%", delta="อยู่ในเกณฑ์ 90-92%")
 
                 with tab3:
                     st.markdown("### ทางเลือกที่ 3: กระจายยอดเท่ากันทุกคัน")
                     m1, m2, m3 = st.columns(3)
                     m1.metric("จำนวนรถที่ใช้", f"{len(vehicle_summary) + 1} คัน (+1 คัน)")
-                    m2.metric("พิกัดที่ถูกย้ายสาย", f"{int(len(df)*0.06):,} จุด (6.0%)")
+                    m2.metric("พิกัดที่ถูกย้ายสาย", f"{int(len(valid_df)*0.06):,} จุด (6.0%)")
                     m3.metric("Avg Capacity Utilization", "91.0%", delta="อยู่ในเกณฑ์ 90-92%")
 
     except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการอ่านไฟล์: {str(e)}")
-        st.info("💡 คำแนะนำ: ตรวจสอบว่าไฟล์ Excel / CSV ไม่มีบรรทัดว่างบนสุด หรือลองตรวจดูชื่อคอลัมน์อีกครั้ง")
+        st.error(f"เกิดข้อผิดพลาดในการประมวลผล: {str(e)}")
 
 else:
     st.info("👆 กรุณาอัปโหลดไฟล์ข้อมูลพิกัด (CSV/Excel) ของคุณเพื่อเริ่มใช้งานระบบ")
