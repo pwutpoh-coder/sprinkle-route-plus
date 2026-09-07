@@ -5,6 +5,7 @@ import pydeck as pdk
 from sklearn.cluster import KMeans
 import calendar
 import io
+import re
 
 # 1. ตั้งค่าหน้าเพจ
 st.set_page_config(
@@ -21,16 +22,29 @@ st.sidebar.header("⚙️ ตั้งค่าข้อมูล")
 uploaded_file = st.sidebar.file_uploader("อัปโหลดไฟล์ Excel / CSV", type=["xlsx", "csv"])
 
 target_year = st.sidebar.number_input("ปี ค.ศ.", min_value=2024, max_value=2030, value=2026)
-target_month = st.sidebar.selectbox("เดือน", range(1, 13), format_func=lambda x: calendar.month_name[x], index=7)
+target_month = st.sidebar.selectbox("เดือน", range(1, 13), format_func=lambda x: calendar.month_name[x], index=7) # Default ส.ค. (8)
 
-# 3. ฟังก์ชันคำนวณวันและจัดการสี
+# Map วันในภาษาไทยกับ Index ของ calendar.monthcalendar (0=จันทร์, ..., 6=อาทิตย์)
+DAY_MAP = {
+    'จันทร์': 0, 'จ': 0,
+    'อังคาร': 1, 'อ': 1,
+    'พุธ': 2, 'พ': 2,
+    'พฤหัสบดี': 3, 'พฤหัส': 3, 'พฤ': 3,
+    'ศุกร์': 4, 'ศ': 4,
+    'เสาร์': 5, 'ส': 5,
+    'อาทิตย์': 6, 'อา': 6
+}
+
 @st.cache_data
-def get_day_count(year, month, day_name):
+def get_days_count_in_month(year, month):
+    """ คืนค่า Dictionary นับจำนวนวันแต่ละวันในเดือน เช่น {'จันทร์': 5, 'อังคาร': 4, ...} """
     cal = calendar.monthcalendar(year, month)
-    days = {'จันทร์': 0, 'อังคาร': 1, 'พุธ': 2, 'พฤหัสบดี': 3, 'ศุกร์': 4, 'เสาร์': 5, 'อาทิตย์': 6}
-    target_idx = days.get(day_name, 0)
-    cnt = sum(1 for week in cal if week[target_idx] != 0)
-    return cnt if cnt > 0 else 4
+    counts = {}
+    for day_name, day_idx in DAY_MAP.items():
+        if len(day_name) > 1 and day_name not in ['พฤหัส', 'พฤ']: # ใช้เฉพาะชื่อเต็ม
+            cnt = sum(1 for week in cal if week[day_idx] != 0)
+            counts[day_name] = cnt if cnt > 0 else 4
+    return counts
 
 @st.cache_data
 def assign_vehicle_colors(df):
@@ -48,6 +62,49 @@ def assign_vehicle_colors(df):
     df['color_rgb'] = df['เบอร์รถ'].astype(str).map(rgb_map)
     return df, rgb_map
 
+# 3. ฟังก์ชันคำนวณยอดส่งเฉลี่ยต่อวันระดับบรรทัดตามสูตรใหม่
+def calculate_row_daily_volume(row, day_counts):
+    """
+    สูตรคำนวณตามโจทย์:
+    1. แยกวันส่งในรอบส่งประจำสัปดาห์ (เช่น จันทร์, พุธ)
+    2. หาจำนวนสัปดาห์/วันในเดือนนั้นๆ (เช่น จันทร์=5, พุธ=4)
+    3. ยอดส่งต่อสัปดาห์ = SUM( ยอดส่งต่อเดือน / จำนวนวันนั้นในเดือน )
+    4. ยอดส่งต่อวัน = ยอดส่งต่อสัปดาห์ / 6
+    """
+    monthly_vol = float(row.get('ยอดส่ง/เดือน', 0))
+    if monthly_vol <= 0:
+        return 0.0
+
+    raw_schedule = str(row.get('รอบส่งประจำสัปดาห์', '')).strip()
+    if not raw_schedule or raw_schedule.lower() == 'nan':
+        return round((monthly_vol / 4) / 6, 2)
+
+    # แยกคำวันส่งด้วย comma, slash, space หรือข้อความ
+    found_days = []
+    for day_name in DAY_MAP.keys():
+        if day_name in raw_schedule:
+            # ใช้เฉพาะชื่อวันมาตรฐาน
+            std_name = 'พฤหัสบดี' if day_name in ['พฤหัสบดี', 'พฤหัส', 'พฤ'] else (
+                       'จันทร์' if day_name in ['จันทร์', 'จ'] else (
+                       'อังคาร' if day_name in ['อังคาร', 'อ'] else (
+                       'พุธ' if day_name in ['พุธ', 'พ'] else (
+                       'ศุกร์' if day_name in ['ศุกร์', 'ศ'] else (
+                       'เสาร์' if day_name in ['เสาร์', 'ส'] else 'อาทิตย์')))))
+            if std_name not in found_days:
+                found_days.append(std_name)
+
+    if not found_days:
+        return round((monthly_vol / 4) / 6, 2)
+
+    weekly_vol_sum = 0.0
+    for day in found_days:
+        days_in_month = day_counts.get(day, 4)
+        weekly_vol_sum += (monthly_vol / days_in_month)
+
+    # คำนวณยอดส่งต่อวัน (หาร 6 วันทำงาน)
+    daily_vol = weekly_vol_sum / 6.0
+    return round(daily_vol, 2)
+
 @st.cache_data
 def process_data(df, year, month):
     df['ยอดส่ง/เดือน'] = pd.to_numeric(df.get('ยอดส่ง/เดือน', 0), errors='coerce').fillna(0)
@@ -61,42 +118,37 @@ def process_data(df, year, month):
         df['latitude'] = 13.7563
         df['longitude'] = 100.5018
 
-    def calc_daily_vol(row):
-        day_str = str(row.get('รอบส่งประจำสัปดาห์', 'จันทร์')).strip()
-        cnt = get_day_count(year, month, day_str)
-        monthly_vol = float(row.get('ยอดส่ง/เดือน', 0))
-        return round(monthly_vol / cnt, 2) if cnt > 0 else round(monthly_vol / 4, 2)
+    # คำนวณยอดส่งต่อวันระดับบรรทัด
+    day_counts = get_days_count_in_month(year, month)
+    df['ยอดส่งเฉลี่ยต่อวัน_คำนวณ'] = df.apply(lambda r: calculate_row_daily_volume(r, day_counts), axis=1)
 
-    df['ยอดส่งเฉลี่ยต่อวัน_พิกัด'] = df.apply(calc_daily_vol, axis=1)
     df, rgb_map = assign_vehicle_colors(df)
     return df, rgb_map
 
 @st.cache_data
 def calculate_vehicle_utilization(df, year, month):
+    """ รวมยอดส่งเฉลี่ยต่อวันจากทุกบรรทัดของเบอร์รถนั้น แล้วเทียบกับกำลังบรรทุกต่อวัน """
     summary_list = []
+    
     for car, group in df.groupby('เบอร์รถ'):
-        main_day = group['รอบส่งประจำสัปดาห์'].mode()[0] if 'รอบส่งประจำสัปดาห์' in group.columns and not group['รอบส่งประจำสัปดาห์'].empty else 'จันทร์'
-        day_count = get_day_count(year, month, str(main_day).strip())
-        
         total_monthly_vol = group['ยอดส่ง/เดือน'].sum()
-        actual_daily_avg = total_monthly_vol / day_count if day_count > 0 else total_monthly_vol / 4
+        total_calculated_daily_vol = group['ยอดส่งเฉลี่ยต่อวัน_คำนวณ'].sum() # รวมจากทุกบรรทัด
+        
         max_daily_cap = group['กำลังบรรทุกต่อวัน(ถัง)'].iloc[0] if 'กำลังบรรทุกต่อวัน(ถัง)' in group.columns else 200
-        utilization_pct = (actual_daily_avg / max_daily_cap) * 100 if max_daily_cap > 0 else 0
+        utilization_pct = (total_calculated_daily_vol / max_daily_cap) * 100 if max_daily_cap > 0 else 0
         
         summary_list.append({
             'เบอร์รถ': car,
-            'รอบส่งหลัก': main_day,
-            'จำนวนวันส่งในเดือน': day_count,
-            'จำนวนจุดส่ง': len(group),
+            'จำนวนจุดส่ง (บรรทัด)': len(group),
             'ยอดรวมส่งทั้งเดือน (ถัง)': total_monthly_vol,
-            'เฉลี่ยส่งต่อวัน (ถัง)': round(actual_daily_avg, 2),
+            'ยอดส่งเฉลี่ยต่อวันรวม (ถัง)': round(total_calculated_daily_vol, 2),
             'กำลังบรรทุกสูงสุด/วัน (ถัง)': max_daily_cap,
             '% การใช้งานกำลังบรรทุก': round(utilization_pct, 2),
             'สถานะ': '⚠️ เกินกำหนด (>100%)' if utilization_pct > 100 else ('🟡 ใกล้เต็ม (90-100%)' if utilization_pct >= 90 else '✅ ปกติ (<90%)')
         })
     return pd.DataFrame(summary_list)
 
-# 4. ฟังก์ชันแสดงผลแผนที่ความเร็วสูง + แสดงถนนฟรี (CARTO Tile Style)
+# 4. แผนที่ความเร็วสูง WebGL (CARTO Style มีเส้นถนนชัดเจน)
 def render_fast_pydeck_map(df_input, selected_cars):
     df_copy = df_input.copy()
     
@@ -136,7 +188,8 @@ def render_fast_pydeck_map(df_input, selected_cars):
         "html": "<b>🚚 เบอร์รถ:</b> {car_str}<br/>"
                 "<b>🆔 รหัสสมาชิก:</b> {รหัสสมาชิก}<br/>"
                 "<b>👤 ชื่อ:</b> {ชื่อ-นามสกุล}<br/>"
-                "<b>📦 ยอดส่ง:</b> {ยอดส่ง/เดือน} ถัง/เดือน",
+                "<b>📦 ยอดส่งต่อเดือน:</b> {ยอดส่ง/เดือน} ถัง<br/>"
+                "<b>⚡ ยอดส่งเฉลี่ย/วัน (บรรทัดนี้):</b> {ยอดส่งเฉลี่ยต่อวัน_คำนวณ} ถัง/วัน",
         "style": {
             "backgroundColor": "#1e293b",
             "color": "white",
@@ -148,7 +201,6 @@ def render_fast_pydeck_map(df_input, selected_cars):
         }
     }
 
-    # ใช้ CARTO Style เพื่อดึงชั้นข้อมูลถนนขึ้นมาแสดงผลอย่างถูกต้อง
     st.pydeck_chart(
         pdk.Deck(
             layers=[layer],
@@ -197,7 +249,7 @@ def rebalance_routes_spatial(df_in, target_cars, fix_stay_ids, fix_move_ids, fra
     df_res, _ = assign_vehicle_colors(df_res)
     return df_res
 
-# 5. ประมวลผลหลักเมื่อมีการอัปโหลดไฟล์
+# 5. ประมวลผลหลักเมื่ออัปโหลดไฟล์
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -229,9 +281,9 @@ if uploaded_file is not None:
             
             render_fast_pydeck_map(df, active_cars_tab1)
 
-            st.subheader("📋 ตารางรายละเอียดพิกัดงาน")
+            st.subheader("📋 ตารางรายละเอียดพิกัดงาน (พร้อมยอดส่งเฉลี่ย/วันรายบรรทัด)")
             filtered_df_tab1 = df[df['เบอร์รถ'].astype(str).isin(active_cars_tab1)]
-            cols_to_show = ['รหัสสมาชิก', 'ชื่อ-นามสกุล', 'เบอร์รถ', 'รอบส่งประจำสัปดาห์', 'ยอดส่ง/เดือน', 'กำลังบรรทุกต่อวัน(ถัง)', 'ที่อยู่จัดส่ง บ้านเลขที่/อาคาร', 'พิกัด Lat/Long']
+            cols_to_show = ['รหัสสมาชิก', 'ชื่อ-นามสกุล', 'เบอร์รถ', 'รอบส่งประจำสัปดาห์', 'ยอดส่ง/เดือน', 'ยอดส่งเฉลี่ยต่อวัน_คำนวณ', 'กำลังบรรทุกต่อวัน(ถัง)', 'ที่อยู่จัดส่ง บ้านเลขที่/อาคาร', 'พิกัด Lat/Long']
             existing_cols = [c for c in cols_to_show if c in filtered_df_tab1.columns]
             render_limited_dataframe(filtered_df_tab1[existing_cols], "tab1")
 
@@ -282,7 +334,7 @@ if uploaded_file is not None:
         with tab3:
             st.subheader("📥 Export ข้อมูล")
             final_export_df = st.session_state.get('selected_option_df', df)
-            cols_to_drop = ['latitude', 'longitude', 'color_rgb', 'ยอดส่งเฉลี่ยต่อวัน_พิกัด']
+            cols_to_drop = ['latitude', 'longitude', 'color_rgb']
             clean_export_df = final_export_df.drop(columns=[c for c in cols_to_drop if c in final_export_df.columns])
 
             output = io.BytesIO()
