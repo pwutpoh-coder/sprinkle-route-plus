@@ -1,9 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import folium
-from folium.plugins import MarkerCluster
-from streamlit_folium import st_folium
+import pydeck as pdk
 from sklearn.cluster import KMeans
 import calendar
 import io
@@ -15,7 +13,7 @@ st.set_page_config(
 )
 
 st.title("📍 Sprinkle Route Plus")
-st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Minimal High-Performance Route Optimization)")
+st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Ultra High-Performance WebGL Engine)")
 
 # Sidebar Control
 st.sidebar.header("⚙️ ตั้งค่าข้อมูล")
@@ -24,7 +22,6 @@ uploaded_file = st.sidebar.file_uploader("อัปโหลดไฟล์ Exce
 target_year = st.sidebar.number_input("ปี ค.ศ.", min_value=2024, max_value=2030, value=2026)
 target_month = st.sidebar.selectbox("เดือน", range(1, 13), format_func=lambda x: calendar.month_name[x], index=7)
 
-# Caching การคำนวณจำนวนวันในเดือน
 @st.cache_data
 def get_day_count(year, month, day_name):
     cal = calendar.monthcalendar(year, month)
@@ -33,20 +30,23 @@ def get_day_count(year, month, day_name):
     cnt = sum(1 for week in cal if week[target_idx] != 0)
     return cnt if cnt > 0 else 4
 
-# Caching การสร้างแม่สีประจำเบอร์รถ
+# แม่สี RGB สำหรับ Pydeck [R, G, B]
 @st.cache_data
 def assign_vehicle_colors(df):
     unique_cars = sorted(df['เบอร์รถ'].astype(str).unique())
-    base_palette_hex = [
-        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
-        '#9467bd', '#8c564b', '#e377c2', '#17becf',
-        '#bcbd22', '#7f7f7f', '#ff9896', '#aec7e8'
+    rgb_palette = [
+        [31, 119, 180], [255, 127, 14], [44, 160, 44], [214, 39, 40],
+        [148, 103, 189], [140, 86, 75], [227, 119, 194], [23, 190, 207],
+        [188, 189, 34], [127, 127, 127], [255, 152, 150], [174, 199, 232]
     ]
-    hex_map = {car: base_palette_hex[i % len(base_palette_hex)] for i, car in enumerate(unique_cars)}
-    df['base_color'] = df['เบอร์รถ'].astype(str).map(hex_map)
-    return df, hex_map
+    
+    rgb_map = {}
+    for i, car in enumerate(unique_cars):
+        rgb_map[car] = rgb_palette[i % len(rgb_palette)]
+        
+    df['color_rgb'] = df['เบอร์รถ'].astype(str).map(rgb_map)
+    return df, rgb_map
 
-# Caching การเตรียมข้อมูลเบื้องต้น
 @st.cache_data
 def process_data(df, year, month):
     df['ยอดส่ง/เดือน'] = pd.to_numeric(df.get('ยอดส่ง/เดือน', 0), errors='coerce').fillna(0)
@@ -67,10 +67,9 @@ def process_data(df, year, month):
         return round(monthly_vol / cnt, 2) if cnt > 0 else round(monthly_vol / 4, 2)
 
     df['ยอดส่งเฉลี่ยต่อวัน_พิกัด'] = df.apply(calc_daily_vol, axis=1)
-    df, hex_map = assign_vehicle_colors(df)
-    return df, hex_map
+    df, rgb_map = assign_vehicle_colors(df)
+    return df, rgb_map
 
-# Caching สรุป Utilization
 @st.cache_data
 def calculate_vehicle_utilization(df, year, month):
     summary_list = []
@@ -96,64 +95,69 @@ def calculate_vehicle_utilization(df, year, month):
         })
     return pd.DataFrame(summary_list)
 
-# ฟังก์ชันแสดงแผนที่มินิมอลสีสว่าง (CartoDB Positron) โหลดเร็วสูง
-def render_folium_map_fast(df_input, selected_cars, key_prefix):
-    map_center = [df_input['latitude'].mean(), df_input['longitude'].mean()]
+# ฟังก์ชันแสดงผลแผนที่ความเร็วสูงสุดด้วย Pydeck WebGL
+def render_fast_pydeck_map(df_input, selected_cars):
+    # กรองเบอร์รถที่เลือก
+    df_copy = df_input.copy()
     
-    # ใช้ไทล์แผนที่โทนขาว-เทาสว่าง เรียบง่าย ไม่กินสเปก
-    m = folium.Map(
-        location=map_center,
-        zoom_start=12,
-        tiles="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-        attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    # ปรับสีคันที่ไม่เลือกให้เป็นสีเทาอ่อน [210, 210, 210]
+    def get_render_color(row):
+        car_str = str(row['เบอร์รถ'])
+        if car_str in selected_cars:
+            return row['color_rgb']
+        return [210, 210, 210, 100]
+
+    df_copy['render_color'] = df_copy.apply(get_render_color, axis=1)
+    df_copy['car_str'] = df_copy['เบอร์รถ'].astype(str)
+    
+    mean_lat = df_copy['latitude'].mean()
+    mean_lon = df_copy['longitude'].mean()
+
+    view_state = pdk.ViewState(
+        latitude=mean_lat if pd.notnull(mean_lat) else 13.7563,
+        longitude=mean_lon if pd.notnull(mean_lon) else 100.5018,
+        zoom=11,
+        pitch=0
     )
 
-    # แยกกรองข้อมูลเพื่อความรวดเร็วในการเรนเดอร์
-    df_visible = df_input[df_input['เบอร์รถ'].astype(str).isin(selected_cars)]
-    df_gray = df_input[~df_input['เบอร์รถ'].astype(str).isin(selected_cars)]
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=df_copy,
+        get_position=["longitude", "latitude"],
+        get_fill_color="render_color",
+        get_radius=120,
+        pickable=True,
+        opacity=0.8,
+        stroked=True,
+        get_line_color=[255, 255, 255],
+        line_width_min_pixels=1,
+    )
 
-    # แสดงหมุดพิกัดของเบอร์รถที่เลือก
-    for _, row in df_visible.iterrows():
-        car_str = str(row['เบอร์รถ'])
-        marker_color = row['base_color']
-        
-        popup_html = f"""
-        <div style="font-family: sans-serif; font-size: 12px; width: 180px;">
-            <b>🆔 รหัส:</b> {row.get('รหัสสมาชิก', '-')}<br/>
-            <b>👤 ชื่อ:</b> {row.get('ชื่อ-นามสกุล', '-')}<br/>
-            <b>🚚 รถ:</b> <b style="color:{marker_color};">{car_str}</b><br/>
-            <b>📦 ยอด:</b> {row.get('ยอดส่ง/เดือน', 0)} ถัง
-        </div>
-        """
+    tooltip = {
+        "html": "<b>🚚 เบอร์รถ:</b> {car_str}<br/>"
+                "<b>🆔 รหัสสมาชิก:</b> {รหัสสมาชิก}<br/>"
+                "<b>👤 ชื่อ:</b> {ชื่อ-นามสกุล}<br/>"
+                "<b>📦 ยอดส่ง:</b> {ยอดส่ง/เดือน} ถัง/เดือน",
+        "style": {
+            "backgroundColor": "#1e293b",
+            "color": "white",
+            "font-family": "sans-serif",
+            "fontSize": "13px",
+            "padding": "10px",
+            "borderRadius": "6px",
+            "zIndex": "999"
+        }
+    }
 
-        folium.CircleMarker(
-            location=[row['latitude'], row['longitude']],
-            radius=6,
-            color=marker_color,
-            fill=True,
-            fill_color=marker_color,
-            fill_opacity=0.85,
-            popup=folium.Popup(popup_html, max_width=220),
-            tooltip=f"🚚 รถ: {car_str} | {row.get('ชื่อ-นามสกุล', '-')}"
-        ).add_to(m)
+    st.pydeck_chart(
+        pdk.Deck(
+            layers=[layer],
+            initial_view_state=view_state,
+            tooltip=tooltip,
+            map_style="mapbox://styles/mapbox/light-v10"
+        )
+    )
 
-    # รวมจุดสีเทาที่ไม่ถูกเลือกให้เป็นกลุ่ม Cluster เพื่อประหยัดการเรนเดอร์บนเบราว์เซอร์
-    if not df_gray.empty:
-        gray_cluster = MarkerCluster(name="จุดที่ไม่ถูกเลือก", options={'maxClusterRadius': 40}).add_to(m)
-        for _, row in df_gray.iterrows():
-            folium.CircleMarker(
-                location=[row['latitude'], row['longitude']],
-                radius=4,
-                color='#CCCCCC',
-                fill=True,
-                fill_color='#CCCCCC',
-                fill_opacity=0.4
-            ).add_to(gray_cluster)
-
-    # returned_objects=[] เพื่อป้องกันการส่งข้อมูลกลับฝั่ง Server เวลาเลื่อน/คลิกแผนที่
-    st_folium(m, width="100%", height=500, key=f"folium_{key_prefix}", returned_objects=[])
-
-# ฟังก์ชันจัดการการแสดงผลตารางแบบปรับจำนวนรายการได้
 def render_limited_dataframe(df_to_show, key_suffix):
     col_limit, _ = st.columns([1, 2])
     with col_limit:
@@ -168,9 +172,8 @@ def render_limited_dataframe(df_to_show, key_suffix):
         st.dataframe(df_to_show, use_container_width=True)
     else:
         st.dataframe(df_to_show.head(limit), use_container_width=True)
-        st.caption(f"⚡ แสดง {limit} รายการแรกเพื่อความรวดเร็ว (ดาวน์โหลดข้อมูลทั้งหมดได้ที่ Tab 3)")
+        st.caption(f"⚡ แสดง {limit} รายการแรกเพื่อความรวดเร็ว (ดาวน์โหลดทั้งหมดได้ที่ Tab 3)")
 
-# อัลกอริทึมจัดสายส่งแบบ Fast Spatial Clustering
 def rebalance_routes_spatial(df_in, target_cars, fix_stay_ids, fix_move_ids, fraction_to_move):
     df_res = df_in.copy()
     eligible_mask = (df_res['เบอร์รถ'].astype(str).isin(target_cars)) & (~df_res['รหัสสมาชิก'].isin(fix_stay_ids))
@@ -201,21 +204,19 @@ if uploaded_file is not None:
         else:
             df_raw = pd.read_excel(uploaded_file)
             
-        df, hex_map = process_data(df_raw, target_year, target_month)
+        df, rgb_map = process_data(df_raw, target_year, target_month)
         all_cars = sorted(df['เบอร์รถ'].astype(str).unique())
         
         tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่สีพิกัด", "⚡ จัดสายส่งใหม่ (3 ทางเลือก)", "📥 สรุปและ Export ข้อมูล"])
         
-        # ----------------------------------------------------
-        # TAB 1: INSPECTION
-        # ----------------------------------------------------
+        # TAB 1
         with tab1:
             st.subheader("📌 สรุปกำลังส่งเฉลี่ยต่อวันเทียบเปอร์เซ็นต์ (% Utilization)")
             veh_summary = calculate_vehicle_utilization(df, target_year, target_month)
             st.dataframe(veh_summary, use_container_width=True)
             
             st.divider()
-            st.subheader("🗺️ แผนที่พิกัดส่งน้ำดื่ม (โหมดมินิมอลสว่าง - คลีนและโหลดไว)")
+            st.subheader("🗺️ แผนที่พิกัดส่งน้ำดื่ม (ประมวลผลความเร็วสูงพิเศษ WebGL)")
             
             selected_cars_tab1 = st.multiselect(
                 "🎨 เลือกเบอร์รถเพื่อเน้นแสดงผลพิกัดบนแผนที่:",
@@ -225,7 +226,7 @@ if uploaded_file is not None:
             )
             active_cars_tab1 = selected_cars_tab1 if selected_cars_tab1 else all_cars
             
-            render_folium_map_fast(df, active_cars_tab1, "tab1")
+            render_fast_pydeck_map(df, active_cars_tab1)
 
             st.subheader("📋 ตารางรายละเอียดพิกัดงาน")
             filtered_df_tab1 = df[df['เบอร์รถ'].astype(str).isin(active_cars_tab1)]
@@ -233,9 +234,7 @@ if uploaded_file is not None:
             existing_cols = [c for c in cols_to_show if c in filtered_df_tab1.columns]
             render_limited_dataframe(filtered_df_tab1[existing_cols], "tab1")
 
-        # ----------------------------------------------------
-        # TAB 2: OPTIMIZATION (3 OPTIONS)
-        # ----------------------------------------------------
+        # TAB 2
         with tab2:
             st.subheader("⚙️ เงื่อนไขการจัดสายส่งใหม่")
             col_a, col_b = st.columns(2)
@@ -269,7 +268,7 @@ if uploaded_file is not None:
                         selected_cars_opt = st.multiselect(f"🎨 เลือกเบอร์รถแสดงผล (Option {idx}):", options=all_cars_opt, default=all_cars_opt, key=f"opt{idx}_selector")
                         active_cars_opt = selected_cars_opt if selected_cars_opt else all_cars_opt
                         
-                        render_folium_map_fast(current_df, active_cars_opt, f"opt{idx}")
+                        render_fast_pydeck_map(current_df, active_cars_opt)
                         
                         filtered_opt = current_df[current_df['เบอร์รถ'].astype(str).isin(active_cars_opt)]
                         render_limited_dataframe(filtered_opt[existing_cols], f"opt{idx}")
@@ -278,13 +277,11 @@ if uploaded_file is not None:
                             st.session_state['selected_option_df'] = current_df
                             st.success(f"บันทึกทางเลือกที่ {idx} เรียบร้อยแล้ว")
 
-        # ----------------------------------------------------
-        # TAB 3: EXPORT
-        # ----------------------------------------------------
+        # TAB 3
         with tab3:
             st.subheader("📥 Export ข้อมูล")
             final_export_df = st.session_state.get('selected_option_df', df)
-            cols_to_drop = ['latitude', 'longitude', 'base_color', 'ยอดส่งเฉลี่ยต่อวัน_พิกัด']
+            cols_to_drop = ['latitude', 'longitude', 'color_rgb', 'ยอดส่งเฉลี่ยต่อวัน_พิกัด']
             clean_export_df = final_export_df.drop(columns=[c for c in cols_to_drop if c in final_export_df.columns])
 
             output = io.BytesIO()
