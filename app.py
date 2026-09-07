@@ -6,6 +6,7 @@ from sklearn.cluster import KMeans
 import calendar
 import io
 
+# 1. ตั้งค่าหน้าเพจ
 st.set_page_config(
     page_title="Sprinkle Route Plus",
     page_icon="🗺️",
@@ -15,13 +16,14 @@ st.set_page_config(
 st.title("📍 Sprinkle Route Plus")
 st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Ultra High-Performance WebGL Engine)")
 
-# Sidebar Control
+# 2. Sidebar สำหรับอัปโหลดไฟล์และตั้งค่า
 st.sidebar.header("⚙️ ตั้งค่าข้อมูล")
 uploaded_file = st.sidebar.file_uploader("อัปโหลดไฟล์ Excel / CSV", type=["xlsx", "csv"])
 
 target_year = st.sidebar.number_input("ปี ค.ศ.", min_value=2024, max_value=2030, value=2026)
 target_month = st.sidebar.selectbox("เดือน", range(1, 13), format_func=lambda x: calendar.month_name[x], index=7)
 
+# 3. ฟังก์ชันคำนวณวันและจัดการสี
 @st.cache_data
 def get_day_count(year, month, day_name):
     cal = calendar.monthcalendar(year, month)
@@ -30,7 +32,6 @@ def get_day_count(year, month, day_name):
     cnt = sum(1 for week in cal if week[target_idx] != 0)
     return cnt if cnt > 0 else 4
 
-# แม่สี RGB สำหรับ Pydeck [R, G, B]
 @st.cache_data
 def assign_vehicle_colors(df):
     unique_cars = sorted(df['เบอร์รถ'].astype(str).unique())
@@ -95,12 +96,10 @@ def calculate_vehicle_utilization(df, year, month):
         })
     return pd.DataFrame(summary_list)
 
-# ฟังก์ชันแสดงผลแผนที่ความเร็วสูงสุดด้วย Pydeck WebGL
+# 4. ฟังก์ชันแสดงผลแผนที่ความเร็วสูง + แสดงถนนฟรี (CARTO Tile Style)
 def render_fast_pydeck_map(df_input, selected_cars):
-    # กรองเบอร์รถที่เลือก
     df_copy = df_input.copy()
     
-    # ปรับสีคันที่ไม่เลือกให้เป็นสีเทาอ่อน [210, 210, 210]
     def get_render_color(row):
         car_str = str(row['เบอร์รถ'])
         if car_str in selected_cars:
@@ -125,9 +124,9 @@ def render_fast_pydeck_map(df_input, selected_cars):
         data=df_copy,
         get_position=["longitude", "latitude"],
         get_fill_color="render_color",
-        get_radius=120,
+        get_radius=100,
         pickable=True,
-        opacity=0.8,
+        opacity=0.85,
         stroked=True,
         get_line_color=[255, 255, 255],
         line_width_min_pixels=1,
@@ -149,12 +148,13 @@ def render_fast_pydeck_map(df_input, selected_cars):
         }
     }
 
+    # ใช้ CARTO Style เพื่อดึงชั้นข้อมูลถนนขึ้นมาแสดงผลอย่างถูกต้อง
     st.pydeck_chart(
         pdk.Deck(
             layers=[layer],
             initial_view_state=view_state,
             tooltip=tooltip,
-            map_style="mapbox://styles/mapbox/light-v10"
+            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
         )
     )
 
@@ -197,6 +197,7 @@ def rebalance_routes_spatial(df_in, target_cars, fix_stay_ids, fix_move_ids, fra
     df_res, _ = assign_vehicle_colors(df_res)
     return df_res
 
+# 5. ประมวลผลหลักเมื่อมีการอัปโหลดไฟล์
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -209,7 +210,7 @@ if uploaded_file is not None:
         
         tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่สีพิกัด", "⚡ จัดสายส่งใหม่ (3 ทางเลือก)", "📥 สรุปและ Export ข้อมูล"])
         
-        # TAB 1
+        # TAB 1: สรุปและแผนที่หลัก
         with tab1:
             st.subheader("📌 สรุปกำลังส่งเฉลี่ยต่อวันเทียบเปอร์เซ็นต์ (% Utilization)")
             veh_summary = calculate_vehicle_utilization(df, target_year, target_month)
@@ -234,7 +235,7 @@ if uploaded_file is not None:
             existing_cols = [c for c in cols_to_show if c in filtered_df_tab1.columns]
             render_limited_dataframe(filtered_df_tab1[existing_cols], "tab1")
 
-        # TAB 2
+        # TAB 2: จัดสายส่งใหม่
         with tab2:
             st.subheader("⚙️ เงื่อนไขการจัดสายส่งใหม่")
             col_a, col_b = st.columns(2)
@@ -277,7 +278,7 @@ if uploaded_file is not None:
                             st.session_state['selected_option_df'] = current_df
                             st.success(f"บันทึกทางเลือกที่ {idx} เรียบร้อยแล้ว")
 
-        # TAB 3
+        # TAB 3: Export ข้อมูล
         with tab3:
             st.subheader("📥 Export ข้อมูล")
             final_export_df = st.session_state.get('selected_option_df', df)
