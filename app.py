@@ -24,7 +24,7 @@ uploaded_file = st.sidebar.file_uploader("อัปโหลดไฟล์ Exce
 target_year = st.sidebar.number_input("ปี ค.ศ.", min_value=2024, max_value=2030, value=2026)
 target_month = st.sidebar.selectbox("เดือน", range(1, 13), format_func=lambda x: calendar.month_name[x], index=7) # Default ส.ค. (8)
 
-# Map วันในภาษาไทยกับ Index ของ calendar.monthcalendar (0=จันทร์, ..., 6=อาทิตย์)
+# Map วันในภาษาไทย
 DAY_MAP = {
     'จันทร์': 0, 'จ': 0,
     'อังคาร': 1, 'อ': 1,
@@ -37,11 +37,11 @@ DAY_MAP = {
 
 @st.cache_data
 def get_days_count_in_month(year, month):
-    """ คืนค่า Dictionary นับจำนวนวันแต่ละวันในเดือน เช่น {'จันทร์': 5, 'อังคาร': 4, ...} """
+    """ คืนค่า Dictionary นับจำนวนวันแต่ละวันในเดือน """
     cal = calendar.monthcalendar(year, month)
     counts = {}
     for day_name, day_idx in DAY_MAP.items():
-        if len(day_name) > 1 and day_name not in ['พฤหัส', 'พฤ']: # ใช้เฉพาะชื่อเต็ม
+        if len(day_name) > 1 and day_name not in ['พฤหัส', 'พฤ']:
             cnt = sum(1 for week in cal if week[day_idx] != 0)
             counts[day_name] = cnt if cnt > 0 else 4
     return counts
@@ -62,15 +62,8 @@ def assign_vehicle_colors(df):
     df['color_rgb'] = df['เบอร์รถ'].astype(str).map(rgb_map)
     return df, rgb_map
 
-# 3. ฟังก์ชันคำนวณยอดส่งเฉลี่ยต่อวันระดับบรรทัดตามสูตรใหม่
+# 3. ฟังก์ชันคำนวณยอดส่งเฉลี่ยต่อวันระดับบรรทัด
 def calculate_row_daily_volume(row, day_counts):
-    """
-    สูตรคำนวณตามโจทย์:
-    1. แยกวันส่งในรอบส่งประจำสัปดาห์ (เช่น จันทร์, พุธ)
-    2. หาจำนวนสัปดาห์/วันในเดือนนั้นๆ (เช่น จันทร์=5, พุธ=4)
-    3. ยอดส่งต่อสัปดาห์ = SUM( ยอดส่งต่อเดือน / จำนวนวันนั้นในเดือน )
-    4. ยอดส่งต่อวัน = ยอดส่งต่อสัปดาห์ / 6
-    """
     monthly_vol = float(row.get('ยอดส่ง/เดือน', 0))
     if monthly_vol <= 0:
         return 0.0
@@ -79,11 +72,9 @@ def calculate_row_daily_volume(row, day_counts):
     if not raw_schedule or raw_schedule.lower() == 'nan':
         return round((monthly_vol / 4) / 6, 2)
 
-    # แยกคำวันส่งด้วย comma, slash, space หรือข้อความ
     found_days = []
     for day_name in DAY_MAP.keys():
         if day_name in raw_schedule:
-            # ใช้เฉพาะชื่อวันมาตรฐาน
             std_name = 'พฤหัสบดี' if day_name in ['พฤหัสบดี', 'พฤหัส', 'พฤ'] else (
                        'จันทร์' if day_name in ['จันทร์', 'จ'] else (
                        'อังคาร' if day_name in ['อังคาร', 'อ'] else (
@@ -101,7 +92,6 @@ def calculate_row_daily_volume(row, day_counts):
         days_in_month = day_counts.get(day, 4)
         weekly_vol_sum += (monthly_vol / days_in_month)
 
-    # คำนวณยอดส่งต่อวัน (หาร 6 วันทำงาน)
     daily_vol = weekly_vol_sum / 6.0
     return round(daily_vol, 2)
 
@@ -118,7 +108,6 @@ def process_data(df, year, month):
         df['latitude'] = 13.7563
         df['longitude'] = 100.5018
 
-    # คำนวณยอดส่งต่อวันระดับบรรทัด
     day_counts = get_days_count_in_month(year, month)
     df['ยอดส่งเฉลี่ยต่อวัน_คำนวณ'] = df.apply(lambda r: calculate_row_daily_volume(r, day_counts), axis=1)
 
@@ -127,12 +116,11 @@ def process_data(df, year, month):
 
 @st.cache_data
 def calculate_vehicle_utilization(df, year, month):
-    """ รวมยอดส่งเฉลี่ยต่อวันจากทุกบรรทัดของเบอร์รถนั้น แล้วเทียบกับกำลังบรรทุกต่อวัน """
     summary_list = []
     
     for car, group in df.groupby('เบอร์รถ'):
         total_monthly_vol = group['ยอดส่ง/เดือน'].sum()
-        total_calculated_daily_vol = group['ยอดส่งเฉลี่ยต่อวัน_คำนวณ'].sum() # รวมจากทุกบรรทัด
+        total_calculated_daily_vol = group['ยอดส่งเฉลี่ยต่อวัน_คำนวณ'].sum()
         
         max_daily_cap = group['กำลังบรรทุกต่อวัน(ถัง)'].iloc[0] if 'กำลังบรรทุกต่อวัน(ถัง)' in group.columns else 200
         utilization_pct = (total_calculated_daily_vol / max_daily_cap) * 100 if max_daily_cap > 0 else 0
@@ -144,11 +132,11 @@ def calculate_vehicle_utilization(df, year, month):
             'ยอดส่งเฉลี่ยต่อวันรวม (ถัง)': round(total_calculated_daily_vol, 2),
             'กำลังบรรทุกสูงสุด/วัน (ถัง)': max_daily_cap,
             '% การใช้งานกำลังบรรทุก': round(utilization_pct, 2),
-            'สถานะ': '⚠️ เกินกำหนด (>100%)' if utilization_pct > 100 else ('🟡 ใกล้เต็ม (90-100%)' if utilization_pct >= 90 else '✅ ปกติ (<90%)')
+            'สถานะ': '⚠️ เกินกำหนด (>100%)' if utilization_pct > 100 else ('🟡 อยู่ในเกณฑ์เป้าหมาย (90-93%)' if 90 <= utilization_pct <= 93 else ('🟡 ใกล้เต็ม (93-100%)' if utilization_pct > 93 else '✅ ปกติ (<90%)'))
         })
     return pd.DataFrame(summary_list)
 
-# 4. แผนที่ความเร็วสูง WebGL (CARTO Style มีเส้นถนนชัดเจน)
+# 4. แผนที่ความเร็วสูง WebGL
 def render_fast_pydeck_map(df_input, selected_cars):
     df_copy = df_input.copy()
     
@@ -226,30 +214,73 @@ def render_limited_dataframe(df_to_show, key_suffix):
         st.dataframe(df_to_show.head(limit), use_container_width=True)
         st.caption(f"⚡ แสดง {limit} รายการแรกเพื่อความรวดเร็ว (ดาวน์โหลดทั้งหมดได้ที่ Tab 3)")
 
-def rebalance_routes_spatial(df_in, target_cars, fix_stay_ids, fix_move_ids, fraction_to_move):
+# 5. อัลกอริทึมตัดสายส่งใหม่โดยคุมเป้าหมาย % Utilization ให้อยู่ในช่วง 90% - 93% ทั้งคันใหม่และคันเก่า
+def rebalance_routes_strict_utilization(df_in, target_cars, fix_stay_ids, fix_move_ids, target_min_pct=90.0, target_max_pct=93.0, new_car_capacity=200.0):
     df_res = df_in.copy()
-    eligible_mask = (df_res['เบอร์รถ'].astype(str).isin(target_cars)) & (~df_res['รหัสสมาชิก'].isin(fix_stay_ids))
-    if fix_move_ids:
-        eligible_mask = eligible_mask | (df_res['รหัสสมาชิก'].isin(fix_move_ids))
-        
-    eligible_df = df_res[eligible_mask]
     
-    if len(eligible_df) >= 5:
-        coords = eligible_df[['latitude', 'longitude']].values
-        n_clusters = max(2, int(len(eligible_df) * fraction_to_move / 5))
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=5).fit(coords)
+    # 1. บังคับย้ายรายการ Fix Move ไปยังคันใหม่ก่อน
+    if fix_move_ids:
+        df_res.loc[df_res['รหัสสมาชิก'].isin(fix_move_ids), 'เบอร์รถ'] = 'NEW-CAR-11'
+
+    # คำนวณเป้าหมายยอดส่งต่อวันของรถคันใหม่ (90-93% ของ Capacity)
+    new_car_target_min = new_car_capacity * (target_min_pct / 100.0)
+    new_car_target_max = new_car_capacity * (target_max_pct / 100.0)
+
+    # วนลูปตัดงานจากแต่ละรถต้นทางที่ถูกเลือก
+    for car in target_cars:
+        car_rows = df_res[df_res['เบอร์รถ'].astype(str) == str(car)]
+        if car_rows.empty:
+            continue
+            
+        car_cap = car_rows['กำลังบรรทุกต่อวัน(ถัง)'].iloc[0] if 'กำลังบรรทุกต่อวัน(ถัง)' in car_rows.columns else 200.0
+        car_target_max_vol = car_cap * (target_max_pct / 100.0) # ยอดส่งสูงสุดที่ยอมให้เหลืออยู่หลังตัด (93%)
+        car_target_min_vol = car_cap * (target_min_pct / 100.0) # ยอดส่งต่ำสุดที่ยอมให้เหลืออยู่หลังตัด (90%)
+
+        # คำนวณยอดปัจจุบัน
+        current_daily_vol = car_rows['ยอดส่งเฉลี่ยต่อวัน_คำนวณ'].sum()
         
-        eligible_df_copy = eligible_df.copy()
-        eligible_df_copy['cluster'] = kmeans.labels_
-        target_cluster = eligible_df_copy['cluster'].value_counts().idxmax()
-        move_indices = eligible_df_copy[eligible_df_copy['cluster'] == target_cluster].index
-        
-        df_res.loc[move_indices, 'เบอร์รถ'] = 'NEW-CAR-11'
-        
+        # ถ้ารถคันนี้เกิน 93% ให้คำนวณตัดออกจนกว่าจะลงมาอยู่ในช่วง 90-93%
+        if current_daily_vol > car_target_max_vol:
+            # กรองเฉพาะบรรทัดที่ได้รับอนุญาตให้ย้ายได้ (ไม่ติด Fix Stay)
+            eligible_candidates = car_rows[~car_rows['รหัสสมาชิก'].isin(fix_stay_ids)].copy()
+            if eligible_candidates.empty:
+                continue
+
+            # เรียงลำดับพื้นที่ให้เกาะกลุ่มด้วย KMeans หรือ ระยะทางจุดศูนย์กลาง
+            if len(eligible_candidates) >= 2:
+                coords = eligible_candidates[['latitude', 'longitude']].values
+                center = coords.mean(axis=0)
+                # คำนวณระยะทางจากจุดศูนย์กลาง
+                eligible_candidates['dist_to_center'] = np.linalg_norm(coords - center, axis=1)
+                # เรียงจากจุดที่อยู่รอบนอกเข้ามาหาศูนย์กลางเพื่อตัดออกเป็นกลุ่มพื้นที่
+                eligible_candidates = eligible_candidates.sort_values(by='dist_to_center', ascending=False)
+
+            # วนลูปตัดงานย้ายไป NEW-CAR-11
+            for idx, candidate in eligible_candidates.iterrows():
+                # ตรวจสอบ ยอดปัจจุบันของคันใหม่
+                new_car_current_vol = df_res[df_res['เบอร์รถ'] == 'NEW-CAR-11']['ยอดส่งเฉลี่ยต่อวัน_คำนวณ'].sum()
+                
+                # ถ้ารถคันใหม่ยอดเต็มเป้าหมาย 93% แล้ว ให้หยุด
+                if new_car_current_vol >= new_car_target_max:
+                    break
+                    
+                cand_vol = candidate['ยอดส่งเฉลี่ยต่อวัน_คำนวณ']
+                
+                # ตรวจสอบว่าถ้าย้ายบรรทัดนี้แล้ว รถต้นทางจะไม่ลดต่ำเกิน 90%
+                if (current_daily_vol - cand_vol) >= car_target_min_vol:
+                    # ตรวจสอบว่าถ้าย้ายแล้ว รถคันใหม่จะไม่เกิน 93%
+                    if (new_car_current_vol + cand_vol) <= new_car_target_max:
+                        df_res.loc[idx, 'เบอร์รถ'] = 'NEW-CAR-11'
+                        current_daily_vol -= cand_vol
+                        
+                # ถ้ารถต้นทางลงมาอยู่ในช่วง 90-93% แล้ว ให้หยุดตัดคันนี้
+                if car_target_min_vol <= current_daily_vol <= car_target_max_vol:
+                    break
+
     df_res, _ = assign_vehicle_colors(df_res)
     return df_res
 
-# 5. ประมวลผลหลักเมื่ออัปโหลดไฟล์
+# 6. ประมวลผลหลักเมื่ออัปโหลดไฟล์
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -289,7 +320,7 @@ if uploaded_file is not None:
 
         # TAB 2: จัดสายส่งใหม่
         with tab2:
-            st.subheader("⚙️ เงื่อนไขการจัดสายส่งใหม่")
+            st.subheader("⚙️ เงื่อนไขการจัดสายส่งใหม่ (ควบคุม % Utilization ให้อยู่ในช่วง 90% - 93%)")
             col_a, col_b = st.columns(2)
             with col_a:
                 selected_source_cars = st.multiselect("🚚 เลือกเฉพาะเบอร์รถที่จะนำมาจัดสายส่งใหม่:", options=all_cars, default=all_cars)
@@ -300,17 +331,20 @@ if uploaded_file is not None:
             with col_c:
                 fix_move = st.multiselect("🚚 รหัสสมาชิกที่บังคับย้ายไปรถคันใหม่", df['รหัสสมาชิก'].unique())
             with col_d:
-                target_pct = st.slider("เป้าหมาย % กำลังบรรทุกของรถคันใหม่", 80, 100, (90, 95))
+                target_pct_range = st.slider("ช่วงเป้าหมาย % กำลังบรรทุกของรถคันใหม่และคันที่ถูกตัด", 85.0, 98.0, (90.0, 93.0), step=0.5)
 
-            if st.button("🚀 ประมวลผลสร้าง 3 ทางเลือกแบบเกาะกลุ่มพื้นที่"):
+            if st.button("🚀 ประมวลผลสร้าง 3 ทางเลือกแบบเกาะกลุ่มพื้นที่ (เป้าหมาย 90-93%)"):
                 source_cars = selected_source_cars if selected_source_cars else all_cars
-                st.session_state['df_opt1'] = rebalance_routes_spatial(df, source_cars, fix_no, fix_move, fraction_to_move=0.12)
-                st.session_state['df_opt2'] = rebalance_routes_spatial(df, source_cars, fix_no, fix_move, fraction_to_move=0.20)
-                st.session_state['df_opt3'] = rebalance_routes_spatial(df, source_cars, fix_no, fix_move, fraction_to_move=0.28)
-                st.success("คำนวณสำเร็จ!")
+                min_p, max_p = target_pct_range
+                
+                # ทางเลือกที่ 1, 2, 3 ปรับความยืดหยุ่นของเกณฑ์ % เพื่อเสนอแนวทางที่หลากหลาย
+                st.session_state['df_opt1'] = rebalance_routes_strict_utilization(df, source_cars, fix_no, fix_move, target_min_pct=min_p, target_max_pct=max_p)
+                st.session_state['df_opt2'] = rebalance_routes_strict_utilization(df, source_cars, fix_no, fix_move, target_min_pct=min_p-1.0, target_max_pct=max_p)
+                st.session_state['df_opt3'] = rebalance_routes_strict_utilization(df, source_cars, fix_no, fix_move, target_min_pct=min_p, target_max_pct=max_p+1.0)
+                st.success("คำนวณและปรับสัดส่วนกำลังบรรทุกให้อยู่ในเกณฑ์สำเร็จ!")
 
             if 'df_opt1' in st.session_state:
-                opt_tab1, opt_tab2, opt_tab3 = st.tabs(["ทางเลือกที่ 1", "ทางเลือกที่ 2", "ทางเลือกที่ 3"])
+                opt_tab1, opt_tab2, opt_tab3 = st.tabs(["ทางเลือกที่ 1 (เกณฑ์เป๊ะ 90-93%)", "ทางเลือกที่ 2 (เน้นตัดออกกระจาย)", "ทางเลือกที่ 3 (เน้นรถคันใหม่เต็มกำลัง)"])
 
                 for idx, (tab, opt_key) in enumerate(zip([opt_tab1, opt_tab2, opt_tab3], ['df_opt1', 'df_opt2', 'df_opt3']), 1):
                     with tab:
