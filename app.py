@@ -214,7 +214,7 @@ def render_limited_dataframe(df_to_show, key_suffix):
         st.dataframe(df_to_show.head(limit), use_container_width=True)
         st.caption(f"⚡ แสดง {limit} รายการแรกเพื่อความรวดเร็ว (ดาวน์โหลดทั้งหมดได้ที่ Tab 3)")
 
-# 5. อัลกอริทึมตัดสายส่งใหม่โดยคุมเป้าหมาย % Utilization ให้อยู่ในช่วง 90% - 93% ทั้งคันใหม่และคันเก่า
+# 5. อัลกอริทึมตัดสายส่งใหม่โดยคุมเป้าหมาย % Utilization ให้อยู่ในช่วง 90% - 93% ทั้งคันใหม่และคันเก่า (แก้ไขจุด np.linalg.norm)
 def rebalance_routes_strict_utilization(df_in, target_cars, fix_stay_ids, fix_move_ids, target_min_pct=90.0, target_max_pct=93.0, new_car_capacity=200.0):
     df_res = df_in.copy()
     
@@ -246,12 +246,12 @@ def rebalance_routes_strict_utilization(df_in, target_cars, fix_stay_ids, fix_mo
             if eligible_candidates.empty:
                 continue
 
-            # เรียงลำดับพื้นที่ให้เกาะกลุ่มด้วย KMeans หรือ ระยะทางจุดศูนย์กลาง
+            # เรียงลำดับพื้นที่ให้เกาะกลุ่มด้วย ระยะทางจากจุดศูนย์กลาง
             if len(eligible_candidates) >= 2:
                 coords = eligible_candidates[['latitude', 'longitude']].values
                 center = coords.mean(axis=0)
-                # คำนวณระยะทางจากจุดศูนย์กลาง
-                eligible_candidates['dist_to_center'] = np.linalg_norm(coords - center, axis=1)
+                # แก้ไขเป็น np.linalg.norm
+                eligible_candidates['dist_to_center'] = np.linalg.norm(coords - center, axis=1)
                 # เรียงจากจุดที่อยู่รอบนอกเข้ามาหาศูนย์กลางเพื่อตัดออกเป็นกลุ่มพื้นที่
                 eligible_candidates = eligible_candidates.sort_values(by='dist_to_center', ascending=False)
 
