@@ -120,7 +120,6 @@ def render_folium_map(df_input, selected_cars, key_prefix):
         car_str = str(row['เบอร์รถ'])
         is_selected = car_str in selected_cars
         
-        # สีพิกัด: ถ้าเลือกใช้สีประจำรถ / ถ้าไม่เลือกใช้สีเทาอ่อน (#D3D3D3)
         marker_color = row['base_color'] if is_selected else '#D3D3D3'
         radius = 7 if is_selected else 5
         opacity = 0.9 if is_selected else 0.4
@@ -154,11 +153,28 @@ def render_folium_map(df_input, selected_cars, key_prefix):
 
     st_folium(m, width="100%", height=520, key=f"folium_{key_prefix}")
 
+# ฟังก์ชันจัดการการแสดงผลตารางพร้อมตัวเลือกจำกัดจำนวนรายการ
+def render_limited_dataframe(df_to_show, key_suffix):
+    col_limit, _ = st.columns([1, 2])
+    with col_limit:
+        limit = st.selectbox(
+            "⚡ เลือกจำนวนรายการตารางที่ต้องการแสดง (เพื่อความรวดเร็ว):",
+            options=[20, 50, 100, "แสดงทั้งหมด"],
+            index=1,
+            key=f"row_limit_{key_suffix}"
+        )
+    
+    if limit == "แสดงทั้งหมด":
+        st.dataframe(df_to_show, use_container_width=True)
+        st.caption(f"แสดงผลทั้งหมด {len(df_to_show):,} รายการ")
+    else:
+        st.dataframe(df_to_show.head(limit), use_container_width=True)
+        st.caption(f"แสดง {limit} รายการแรก จากทั้งหมด {len(df_to_show):,} รายการ (ดาวน์โหลดข้อมูลทั้งหมดได้ที่ Tab 3)")
+
 # อัลกอริทึมจัดสายส่งแบบกระจุกตัวตามพื้นที่ (Spatial Clustering)
 def rebalance_routes_spatial(df_in, target_cars, fix_stay_ids, fix_move_ids, fraction_to_move):
     df_res = df_in.copy()
     
-    # ดึงเฉพาะแถวที่อนุญาตให้ย้ายได้
     eligible_mask = (df_res['เบอร์รถ'].astype(str).isin(target_cars)) & (~df_res['รหัสสมาชิก'].isin(fix_stay_ids))
     if fix_move_ids:
         eligible_mask = eligible_mask | (df_res['รหัสสมาชิก'].isin(fix_move_ids))
@@ -166,12 +182,10 @@ def rebalance_routes_spatial(df_in, target_cars, fix_stay_ids, fix_move_ids, fra
     eligible_df = df_res[eligible_mask]
     
     if len(eligible_df) >= 5:
-        # ใช้ K-Means หรือจุดศูนย์กลางพิกัดหา Cluster ที่อยู่ใกล้กันมากที่สุด
         coords = eligible_df[['latitude', 'longitude']].values
         n_clusters = max(2, int(len(eligible_df) * fraction_to_move / 5))
         kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10).fit(coords)
         
-        # เลือกว่า Cluster ไหนเกาะกลุ่มแน่นที่สุดเพื่อย้ายไปคันใหม่ NEW-CAR-11
         cluster_labels = kmeans.labels_
         eligible_df_copy = eligible_df.copy()
         eligible_df_copy['cluster'] = cluster_labels
@@ -223,7 +237,9 @@ if uploaded_file is not None:
             filtered_df_tab1 = df[df['เบอร์รถ'].astype(str).isin(active_cars_tab1)]
             cols_to_show = ['รหัสสมาชิก', 'ชื่อ-นามสกุล', 'เบอร์รถ', 'รอบส่งประจำสัปดาห์', 'ยอดส่ง/เดือน', 'กำลังบรรทุกต่อวัน(ถัง)', 'ที่อยู่จัดส่ง บ้านเลขที่/อาคาร', 'พิกัด Lat/Long']
             existing_cols = [c for c in cols_to_show if c in filtered_df_tab1.columns]
-            st.dataframe(filtered_df_tab1[existing_cols], use_container_width=True)
+            
+            # เรียกใช้ฟังก์ชันแสดงตารางแบบจำกัดแถว
+            render_limited_dataframe(filtered_df_tab1[existing_cols], "tab1")
 
         # ----------------------------------------------------
         # TAB 2: OPTIMIZATION (3 OPTIONS)
@@ -251,13 +267,8 @@ if uploaded_file is not None:
             if st.button("🚀 ประมวลผลสร้าง 3 ทางเลือกแบบเกาะกลุ่มพื้นที่ (Spatial Optimization)"):
                 source_cars = selected_source_cars if selected_source_cars else all_cars
                 
-                # OPTION 1: เกาะกลุ่มพื้นที่ขนาดเล็ก (ตัดย้ายน้อย)
                 df_opt1 = rebalance_routes_spatial(df, source_cars, fix_no, fix_move, fraction_to_move=0.12)
-                
-                # OPTION 2: เกาะกลุ่มพื้นที่ขนาดกลาง
                 df_opt2 = rebalance_routes_spatial(df, source_cars, fix_no, fix_move, fraction_to_move=0.20)
-
-                # OPTION 3: เกาะกลุ่มพื้นที่สมดุลกำลังบรรทุก
                 df_opt3 = rebalance_routes_spatial(df, source_cars, fix_no, fix_move, fraction_to_move=0.28)
 
                 st.session_state['df_opt1'] = df_opt1
@@ -294,7 +305,7 @@ if uploaded_file is not None:
                     render_folium_map(df_opt1, active_cars_opt1, "opt1")
                     
                     filtered_opt1 = df_opt1[df_opt1['เบอร์รถ'].astype(str).isin(active_cars_opt1)]
-                    st.dataframe(filtered_opt1[existing_cols], use_container_width=True)
+                    render_limited_dataframe(filtered_opt1[existing_cols], "opt1")
                     
                     if st.button("เลือกทางเลือกที่ 1 สำหรับ Export"):
                         st.session_state['selected_option_df'] = df_opt1
@@ -318,7 +329,7 @@ if uploaded_file is not None:
                     render_folium_map(df_opt2, active_cars_opt2, "opt2")
 
                     filtered_opt2 = df_opt2[df_opt2['เบอร์รถ'].astype(str).isin(active_cars_opt2)]
-                    st.dataframe(filtered_opt2[existing_cols], use_container_width=True)
+                    render_limited_dataframe(filtered_opt2[existing_cols], "opt2")
                     
                     if st.button("เลือกทางเลือกที่ 2 สำหรับ Export"):
                         st.session_state['selected_option_df'] = df_opt2
@@ -342,7 +353,7 @@ if uploaded_file is not None:
                     render_folium_map(df_opt3, active_cars_opt3, "opt3")
 
                     filtered_opt3 = df_opt3[df_opt3['เบอร์รถ'].astype(str).isin(active_cars_opt3)]
-                    st.dataframe(filtered_opt3[existing_cols], use_container_width=True)
+                    render_limited_dataframe(filtered_opt3[existing_cols], "opt3")
                     
                     if st.button("เลือกทางเลือกที่ 3 สำหรับ Export"):
                         st.session_state['selected_option_df'] = df_opt3
