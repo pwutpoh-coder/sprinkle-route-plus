@@ -24,26 +24,31 @@ uploaded_file = st.sidebar.file_uploader("อัปโหลดไฟล์ Exce
 target_year = st.sidebar.number_input("ปี ค.ศ.", min_value=2024, max_value=2030, value=2026)
 target_month = st.sidebar.selectbox("เดือน", range(1, 13), format_func=lambda x: calendar.month_name[x], index=7) # Default ส.ค. (8)
 
-# Map วันในภาษาไทย
+# Map วันในภาษาไทย (ตัดวันอาทิตย์ออกจากการคำนวณรอบส่งปกติ)
 DAY_MAP = {
     'จันทร์': 0, 'จ': 0,
     'อังคาร': 1, 'อ': 1,
     'พุธ': 2, 'พ': 2,
     'พฤหัสบดี': 3, 'พฤหัส': 3, 'พฤ': 3,
     'ศุกร์': 4, 'ศ': 4,
-    'เสาร์': 5, 'ส': 5,
-    'อาทิตย์': 6, 'อา': 6
+    'เสาร์': 5, 'ส': 5
+    # ไม่นับวันอาทิตย์
 }
 
 @st.cache_data
 def get_days_count_in_month(year, month):
-    """ คืนค่า Dictionary นับจำนวนวันแต่ละวันในเดือน """
+    """ คืนค่า Dictionary นับจำนวนวันแต่ละวันในเดือน (ไม่นับวันอาทิตย์) """
     cal = calendar.monthcalendar(year, month)
     counts = {}
+    total_working_days = 0
     for day_name, day_idx in DAY_MAP.items():
         if len(day_name) > 1 and day_name not in ['พฤหัส', 'พฤ']:
             cnt = sum(1 for week in cal if week[day_idx] != 0)
             counts[day_name] = cnt if cnt > 0 else 4
+            total_working_days += cnt
+    
+    # คำนวณค่าเฉลี่ยวันทำงานรวมในเดือน (จันทร์-เสาร์) เพื่อใช้เป็นตัวหารสำรอง
+    counts['_total_working_days'] = total_working_days if total_working_days > 0 else 26
     return counts
 
 @st.cache_data
@@ -62,15 +67,17 @@ def assign_vehicle_colors(df):
     df['color_rgb'] = df['เบอร์รถ'].astype(str).map(rgb_map)
     return df, rgb_map
 
-# 3. ฟังก์ชันคำนวณยอดส่งเฉลี่ยต่อวันระดับบรรทัด
+# 3. ฟังก์ชันคำนวณยอดส่งเฉลี่ยต่อวันระดับบรรทัด (ไม่นับวันอาทิตย์)
 def calculate_row_daily_volume(row, day_counts):
     monthly_vol = float(row.get('ยอดส่ง/เดือน', 0))
     if monthly_vol <= 0:
         return 0.0
 
     raw_schedule = str(row.get('รอบส่งประจำสัปดาห์', '')).strip()
+    fallback_days = day_counts.get('_total_working_days', 26)
+    
     if not raw_schedule or raw_schedule.lower() == 'nan':
-        return round(monthly_vol / 25.0, 2)
+        return round(monthly_vol / fallback_days, 2)
 
     found_days = []
     for day_name in DAY_MAP.keys():
@@ -79,13 +86,12 @@ def calculate_row_daily_volume(row, day_counts):
                        'จันทร์' if day_name in ['จันทร์', 'จ'] else (
                        'อังคาร' if day_name in ['อังคาร', 'อ'] else (
                        'พุธ' if day_name in ['พุธ', 'พ'] else (
-                       'ศุกร์' if day_name in ['ศุกร์', 'ศ'] else (
-                       'เสาร์' if day_name in ['เสาร์', 'ส'] else 'อาทิตย์')))))
+                       'ศุกร์' if day_name in ['ศุกร์', 'ศ'] else 'เสาร์'))))
             if std_name not in found_days:
                 found_days.append(std_name)
 
     if not found_days:
-        return round(monthly_vol / 25.0, 2)
+        return round(monthly_vol / fallback_days, 2)
 
     avg_days_in_month = sum(day_counts.get(day, 4) for day in found_days) / len(found_days)
     if avg_days_in_month <= 0:
@@ -119,6 +125,8 @@ def process_data(df, year, month):
 @st.cache_data
 def calculate_vehicle_utilization(df, year, month):
     summary_list = []
+    day_counts = get_days_count_in_month(year, month)
+    fallback_days = day_counts.get('_total_working_days', 26)
     
     for car, group in df.groupby('เบอร์รถ'):
         total_monthly_vol = group['ยอดส่ง/เดือน'].sum()
@@ -127,7 +135,7 @@ def calculate_vehicle_utilization(df, year, month):
         max_daily_cap = group['กำลังบรรทุกต่อวัน(ถัง)'].iloc[0] if 'กำลังบรรทุกต่อวัน(ถัง)' in group.columns else 200
         
         if total_calculated_daily_vol > (max_daily_cap * 2):
-            total_calculated_daily_vol = total_monthly_vol / 25.0
+            total_calculated_daily_vol = total_monthly_vol / fallback_days
 
         utilization_pct = (total_calculated_daily_vol / max_daily_cap) * 100 if max_daily_cap > 0 else 0
         
@@ -286,7 +294,7 @@ if uploaded_file is not None:
         
         # TAB 1: สรุปและแผนที่หลัก
         with tab1:
-            st.subheader("📌 สรุปกำลังส่งเฉลี่ยต่อวันเทียบเปอร์เซ็นต์ (% Utilization)")
+            st.subheader("📌 สรุปกำลังส่งเฉลี่ยต่อวันเทียบเปอร์เซ็นต์ (% Utilization) [ไม่นับวันอาทิตย์]")
             veh_summary = calculate_vehicle_utilization(df, target_year, target_month)
             st.dataframe(veh_summary, use_container_width=True)
             
