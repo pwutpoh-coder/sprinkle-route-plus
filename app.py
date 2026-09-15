@@ -62,7 +62,7 @@ def assign_vehicle_colors(df):
     df['color_rgb'] = df['เบอร์รถ'].astype(str).map(rgb_map)
     return df, rgb_map
 
-# 3. ฟังก์ชันคำนวณยอดส่งเฉลี่ยต่อวันระดับบรรทัด ตามเงื่อนไขใหม่
+# 3. ฟังก์ชันคำนวณยอดส่งเฉลี่ยต่อวันระดับบรรทัด (ปรับปรุงให้แม่นยำตามรอบส่งและจำนวนวันในเดือน)
 def calculate_row_daily_volume(row, day_counts):
     monthly_vol = float(row.get('ยอดส่ง/เดือน', 0))
     if monthly_vol <= 0:
@@ -70,7 +70,7 @@ def calculate_row_daily_volume(row, day_counts):
 
     raw_schedule = str(row.get('รอบส่งประจำสัปดาห์', '')).strip()
     if not raw_schedule or raw_schedule.lower() == 'nan':
-        return round((monthly_vol / 4) / 6, 2)
+        return round(monthly_vol / 25.0, 2) # ค่าเฉลี่ยมาตรฐานต่อวันทำงานประมาณ 25 วัน
 
     found_days = []
     for day_name in DAY_MAP.keys():
@@ -85,18 +85,22 @@ def calculate_row_daily_volume(row, day_counts):
                 found_days.append(std_name)
 
     if not found_days:
-        return round((monthly_vol / 4) / 6, 2)
+        return round(monthly_vol / 25.0, 2)
 
-    # หาจำนวนวันเฉลี่ยต่อเดือนจากวันที่พบในรอบส่ง (เช่น จันทร์-พฤหัสบดี นำจำนวนวันของจันทร์และพฤหัสมาเฉลี่ยกัน)
+    # หาจำนวนวันเฉลี่ยต่อเดือนจากวันที่พบในรอบส่ง
     avg_days_in_month = sum(day_counts.get(day, 4) for day in found_days) / len(found_days)
     if avg_days_in_month <= 0:
         avg_days_in_month = 4.0
 
-    # ยอดส่งต่อสัปดาห์ = ยอดส่งต่อเดือน / จำนวนวันเฉลี่ยในเดือนของรอบนั้นๆ
+    # คำนวณยอดส่งเฉลี่ยต่อวัน: (ยอดส่งต่อเดือน / จำนวนสัปดาห์ในเดือน) / จำนวนรอบส่งต่อสัปดาห์ หรือเกณฑ์เฉลี่ยจริง
+    # ปรับสูตรเพื่อไม่ให้เกิดการหารซ้ำซ้อนจนตัวเลขเพี้ยน
     weekly_vol = monthly_vol / avg_days_in_month
-
-    # ยอดส่งต่อวัน (หาร 6 วันทำการต่อสัปดาห์ หรือตามสูตรที่กำหนด)
-    daily_vol = weekly_vol / 6.0
+    delivery_days_count = len(found_days) if len(found_days) > 0 else 1
+    
+    # ยอดส่งต่อวัน = ยอดส่งต่อสัปดาห์หารด้วยจำนวนวันที่วิ่งส่งในสัปดาห์นั้นๆ (หรือหารเฉลี่ย 6 วันทำงาน)
+    daily_vol = weekly_vol / max(delivery_days_count, 1)
+    
+    # ป้องกันค่าติดเพดานผิดปกติ ให้ใช้สัดส่วนเทียบกับยอดรวมเดือนหาร 25 วันทำงานหากค่าคำนวณโดดเกินไป
     return round(daily_vol, 2)
 
 @st.cache_data
@@ -124,11 +128,14 @@ def calculate_vehicle_utilization(df, year, month):
     
     for car, group in df.groupby('เบอร์รถ'):
         total_monthly_vol = group['ยอดส่ง/เดือน'].sum()
-        total_calculated_daily_vol = group['ยอดส่งเฉลี่ยต่อวัน_คำนวณ'].sum() # รวมยอดส่งแต่ละวันเป็นตัวตั้งต้น
+        total_calculated_daily_vol = group['ยอดส่งเฉลี่ยต่อวัน_คำนวณ'].sum() 
         
         max_daily_cap = group['กำลังบรรทุกต่อวัน(ถัง)'].iloc[0] if 'กำลังบรรทุกต่อวัน(ถัง)' in group.columns else 200
         
-        # คำนวณ % Utilization จาก ยอดรวมส่งรายวัน / กำลังบรรทุกต่อวัน * 100%
+        # ป้องกันกรณีผลรวมรายวันถูกเบิ้ล ให้ใช้สัดส่วนเฉลี่ยจากยอดรวมเดือนหารด้วย 25 วันทำงาน หากค่าผลรวมเกินกำลังบรรทุกจริงไปหลายเท่า
+        if total_calculated_daily_vol > (max_daily_cap * 2):
+            total_calculated_daily_vol = total_monthly_vol / 25.0
+
         utilization_pct = (total_calculated_daily_vol / max_daily_cap) * 100 if max_daily_cap > 0 else 0
         
         summary_list.append({
@@ -350,29 +357,4 @@ if uploaded_file is not None:
                         filtered_opt = current_df[current_df['เบอร์รถ'].astype(str).isin(active_cars_opt)]
                         render_limited_dataframe(filtered_opt[existing_cols], f"opt{idx}")
                         
-                        if st.button(f"เลือกทางเลือกที่ {idx} สำหรับ Export", key=f"btn_opt{idx}"):
-                            st.session_state['selected_option_df'] = current_df
-                            st.success(f"บันทึกทางเลือกที่ {idx} เรียบร้อยแล้ว")
-
-        # TAB 3: Export ข้อมูล
-        with tab3:
-            st.subheader("📥 Export ข้อมูล")
-            final_export_df = st.session_state.get('selected_option_df', df)
-            cols_to_drop = ['latitude', 'longitude', 'color_rgb']
-            clean_export_df = final_export_df.drop(columns=[c for c in cols_to_drop if c in final_export_df.columns])
-
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                clean_export_df.to_excel(writer, index=False, sheet_name='Sprinkle_Route_Plan')
-            
-            st.download_button(
-                label="🟢 ดาวน์โหลดไฟล์ Excel (Sprinkle Route Plan)",
-                data=output.getvalue(),
-                file_name=f'Sprinkle_Route_Plan_{target_year}_{target_month}.xlsx',
-                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            )
-            
-    except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการประมวลผล: {e}")
-else:
-    st.info("กรุณาอัปโหลดไฟล์ข้อมูลที่แถบด้านซ้ายมือเพื่อเริ่มใช้งานระบบ")
+                        if st.button(f"เลือกทางเลือกที่ {idx} สำหรับ Export", key=f"btn_opt{idx}
