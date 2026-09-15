@@ -2,10 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import pydeck as pdk
-from sklearn.cluster import KMeans
 import calendar
 import io
-import re
 
 # 1. ตั้งค่าหน้าเพจ
 st.set_page_config(
@@ -37,13 +35,22 @@ DAY_MAP = {
 
 @st.cache_data
 def get_days_count_in_month(year, month):
-    """ คืนค่า Dictionary นับจำนวนวันแต่ละวันในเดือน (ไม่นับวันอาทิตย์) """
+    """ คืนค่า Dictionary นับจำนวนวันแต่ละวันในเดือน (ไม่นับวันอาทิตย์) และจำนวนวันทำการรวมทั้งเดือน (เช่น สิงหาคม 2569 = 26 วัน) """
     cal = calendar.monthcalendar(year, month)
     counts = {}
+    total_working_days = 0
+    for week in cal:
+        for i, day in enumerate(week):
+            if day != 0:
+                if i != 6: # ไม่นับวันอาทิตย์
+                    total_working_days += 1
+
     for day_name, day_idx in DAY_MAP.items():
         if len(day_name) > 1 and day_name not in ['พฤหัส', 'พฤ']:
             cnt = sum(1 for week in cal if week[day_idx] != 0)
             counts[day_name] = cnt if cnt > 0 else 4
+            
+    counts['TOTAL_WORKING_DAYS'] = total_working_days if total_working_days > 0 else 26
     return counts
 
 @st.cache_data
@@ -62,15 +69,17 @@ def assign_vehicle_colors(df):
     df['color_rgb'] = df['เบอร์รถ'].astype(str).map(rgb_map)
     return df, rgb_map
 
-# 3. ฟังก์ชันคำนวณยอดส่งเฉลี่ยต่อวันระดับบรรทัดตามตรรกะใหม่
+# 3. ฟังก์ชันคำนวณยอดส่งเฉลี่ยต่อวันระดับบรรทัดตามตรรกะที่ถูกต้อง
 def calculate_row_daily_volume(row, day_counts):
     monthly_vol = float(row.get('ยอดส่ง/เดือน', 0))
     if monthly_vol <= 0:
         return 0.0
 
     raw_schedule = str(row.get('รอบส่งประจำสัปดาห์', '')).strip()
+    total_working_days = day_counts.get('TOTAL_WORKING_DAYS', 26)
+    
     if not raw_schedule or raw_schedule.lower() == 'nan':
-        return round(monthly_vol / 26.0, 2)
+        return round(monthly_vol / total_working_days, 2)
 
     found_days = []
     for day_name in DAY_MAP.keys():
@@ -84,7 +93,7 @@ def calculate_row_daily_volume(row, day_counts):
                 found_days.append(std_name)
 
     if not found_days:
-        return round(monthly_vol / 26.0, 2)
+        return round(monthly_vol / total_working_days, 2)
 
     # หาค่าเฉลี่ยจำนวนวันในเดือนของรอบส่งนั้นๆ
     avg_days_in_month = sum(day_counts.get(day, 4) for day in found_days) / len(found_days)
@@ -124,6 +133,7 @@ def calculate_vehicle_utilization(df, year, month):
     
     for car, group in df.groupby('เบอร์รถ'):
         total_monthly_vol = group['ยอดส่ง/เดือน'].sum()
+        # รวมผลบวกรายบรรทัดที่คำนวณเสร็จแล้วโดยตรง
         total_calculated_daily_vol = group['ยอดส่งเฉลี่ยต่อวัน_คำนวณ'].sum() 
         
         max_daily_cap = group['กำลังบรรทุกต่อวัน(ถัง)'].iloc[0] if 'กำลังบรรทุกต่อวัน(ถัง)' in group.columns else 200
@@ -285,7 +295,7 @@ if uploaded_file is not None:
         
         # TAB 1: สรุปและแผนที่หลัก
         with tab1:
-            st.subheader("📌 สรุปกำลังส่งเฉลี่ยต่อวันเทียบเปอร์เซ็นต์ (% Utilization) [ไม่นับวันอาทิตย์ / หาร 6 วัน]")
+            st.subheader(f"📌 สรุปกำลังส่งเฉลี่ยต่อวันเทียบเปอร์เซ็นต์ (% Utilization) [เดือน {calendar.month_name[target_month]} {target_year}: 26 วันทำการ / หาร 6]")
             veh_summary = calculate_vehicle_utilization(df, target_year, target_month)
             st.dataframe(veh_summary, use_container_width=True)
             
