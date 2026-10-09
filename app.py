@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 st.title("📍 Sprinkle Route Plus")
-st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Interactive Lat/Long Bounding Box Slider with Live Preview)")
+st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Interactive Lat/Long Bounding Box & Auto-Rebalance Engine)")
 
 # 2. Sidebar สำหรับอัปโหลดไฟล์และตั้งค่า
 st.sidebar.header("⚙️ ตั้งค่าข้อมูล")
@@ -169,7 +169,7 @@ def calculate_vehicle_utilization(df, year, month):
         })
     return pd.DataFrame(summary_list)
 
-# 4. ฟังก์ชันแสดงแผนที่ Pydeck พร้อมเส้นกรอบพื้นที่ (Bounding Box Guide Lines)
+# 4. ฟังก์ชันแสดงแผนที่ Pydeck พร้อมเส้นกรอบพื้นที่และไฮไลต์สีตามสถานะรถ
 def render_dynamic_axis_pydeck_map(df_input, selected_cars, lat_min, lat_max, lon_min, lon_max):
     df_copy = df_input.copy()
     if 'color_rgb' not in df_copy.columns:
@@ -177,8 +177,10 @@ def render_dynamic_axis_pydeck_map(df_input, selected_cars, lat_min, lat_max, lo
     
     def get_render_color(row):
         car_str = str(row['เบอร์รถ'])
-        if lat_min <= row['latitude'] <= lat_max and lon_min <= row['longitude'] <= lon_max:
-            return [255, 0, 0, 240] # จุดภายในกรอบ Lat/Long (สีแดงเด่นชัด)
+        if car_str == 'NEW-CAR-99':
+            return [255, 0, 0, 255] # สีแดงเข้มสำหรับรถใหม่
+        elif lat_min <= row['latitude'] <= lat_max and lon_min <= row['longitude'] <= lon_max:
+            return [255, 140, 0, 220] # สีส้มสำหรับจุดในกรอบเลือก
         elif car_str in selected_cars:
             return row['color_rgb']
         return [200, 200, 200, 40]
@@ -196,7 +198,6 @@ def render_dynamic_axis_pydeck_map(df_input, selected_cars, lat_min, lat_max, lo
         pitch=0
     )
 
-    # 1. เลเยอร์จุดพิกัด
     scatter_layer = pdk.Layer(
         "ScatterplotLayer",
         data=df_copy,
@@ -210,7 +211,6 @@ def render_dynamic_axis_pydeck_map(df_input, selected_cars, lat_min, lat_max, lo
         line_width_min_pixels=1,
     )
 
-    # 2. เลเยอร์เส้นกรอบพื้นที่ (Bounding Box Guide Lines)
     box_coords = [
         [lon_min, lat_min],
         [lon_max, lat_min],
@@ -221,20 +221,17 @@ def render_dynamic_axis_pydeck_map(df_input, selected_cars, lat_min, lat_max, lo
     
     mid_lat = (lat_min + lat_max) / 2.0
     mid_lon = (lon_min + lon_max) / 2.0
-    cross_lat_path = [[lon_min, mid_lat], [lon_max, mid_lat]]
-    cross_lon_path = [[mid_lon, lat_min], [mid_lon, lat_max]]
-
     path_data = [
         {"path": box_coords, "name": "BoundingBox"},
-        {"path": cross_lat_path, "name": "CrossLat"},
-        {"path": cross_lon_path, "name": "CrossLon"}
+        {"path": [[lon_min, mid_lat], [lon_max, mid_lat]], "name": "CrossLat"},
+        {"path": [[mid_lon, lat_min], [mid_lon, lat_max]], "name": "CrossLon"}
     ]
     
     line_layer = pdk.Layer(
         "PathLayer",
         data=path_data,
         get_path="path",
-        get_color=[255, 102, 0, 220],
+        get_color=[255, 69, 0, 220],
         width_scale=15,
         width_min_pixels=2,
         pickable=False
@@ -244,7 +241,6 @@ def render_dynamic_axis_pydeck_map(df_input, selected_cars, lat_min, lat_max, lo
         "html": "<b>🚚 เบอร์รถ:</b> {car_str}<br/>"
                 "<b>🆔 รหัสสมาชิก:</b> {รหัสสมาชิก}<br/>"
                 "<b>👤 ชื่อ:</b> {ชื่อ-นามสกุล}<br/>"
-                "<b>📍 Lat/Long:</b> {latitude}, {longitude}<br/>"
                 "<b>📦 ยอดส่งต่อเดือน:</b> {ยอดส่ง/เดือน} ถัง<br/>"
                 "<b>⚡ ยอดส่งเฉลี่ย/สัปดาห์:</b> {ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ} ถัง/สัปดาห์",
         "style": {
@@ -283,7 +279,7 @@ def render_limited_dataframe(df_to_show, key_suffix):
         st.dataframe(df_to_show.head(limit), use_container_width=True)
         st.caption(f"⚡ แสดง {limit} รายการแรกเพื่อความรวดเร็ว")
 
-# 5. ฟังก์ชันจัดสายส่งใหม่ด้วยการเลือกพื้นที่ (Bounding Box Selection) พร้อมคำนวณเทียบเป้าหมาย
+# 5. ฟังก์ชันจัดสายส่งใหม่ (Auto Rebalance ตามเกณฑ์ 90-93%)
 def process_area_selection_route(df_in, lat_min, lat_max, lon_min, lon_max, custom_daily_cap, target_min=90.0, target_max=93.0):
     df_res = df_in.copy()
     max_daily_cap = custom_daily_cap
@@ -324,7 +320,7 @@ def process_area_selection_route(df_in, lat_min, lat_max, lon_min, lon_max, cust
         df_res.loc[valid_indices, 'กำลังบรรทุกต่อวัน(ถัง)'] = max_daily_cap
         
         pct_util = round((accumulated_vol / max_weekly_cap) * 100, 2)
-        msg = f"⚠️ พื้นที่เลือกมียอดส่งเกินเกณฑ์ (>93%) ระบบตัดขอบนอกออกอัตโนมัติ คงเหลือ {round(accumulated_vol, 2)} ถัง/สัปดาห์ (คิดเป็น {pct_util}%) เข้าสู่เกณฑ์ปกติ"
+        msg = f"🔴 ยอดส่งในกรอบเกินเกณฑ์ (>93% คิดเป็น {pct_util}%) ระบบได้ทำการ **ตัดขอบนอกออกอัตโนมัติ** จนเหลือ {round(accumulated_vol, 2)} ถัง/สัปดาห์ (เข้าสู่เกณฑ์ปกติ 90-93%) และส่งจุดที่ตัดคืนให้รถคันเดิมที่ใกล้ที่สุดเรียบร้อยแล้ว!"
         
         for drop_idx in dropped_indices:
             drop_row = df_res.loc[drop_idx]
@@ -336,7 +332,7 @@ def process_area_selection_route(df_in, lat_min, lat_max, lon_min, lon_max, cust
 
     elif total_vol < target_min_vol:
         pct_util_initial = round((total_vol / max_weekly_cap) * 100, 2)
-        msg = f"⚠️ ยอดส่งต่ำกว่าเกณฑ์ (<90% โดยมียอด {round(total_vol, 2)} ถัง/สัปดาห์ คิดเป็น {pct_util_initial}%) ระบบกำลังดึงจุดส่งรอบข้างที่ใกล้ที่สุดมาเติมให้ครบช่วง 90-93%..."
+        msg = f"⚠️ ยอดส่งในกรอบต่ำกว่าเกณฑ์ (<90% มีเพียง {round(total_vol, 2)} ถัง/สัปดาห์ หรือ {pct_util_initial}%) ระบบกำลัง **ดึงจุดส่งรอบข้างที่ใกล้ที่สุดมาเติมให้อัตโนมัติ**..."
         
         df_res.loc[selected_subset.index, 'เบอร์รถ'] = 'NEW-CAR-99'
         df_res.loc[selected_subset.index, 'กำลังบรรทุกต่อวัน(ถัง)'] = max_daily_cap
@@ -353,7 +349,7 @@ def process_area_selection_route(df_in, lat_min, lat_max, lon_min, lon_max, cust
             for idx, row in outside_df.iterrows():
                 if current_new_vol < target_min_vol:
                     vol = row['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ']
-                    if current_new_vol + vol <= target_max_vol:
+                    if (current_new_vol + vol) <= target_max_vol:
                         df_res.loc[idx, 'เบอร์รถ'] = 'NEW-CAR-99'
                         df_res.loc[idx, 'กำลังบรรทุกต่อวัน(ถัง)'] = max_daily_cap
                         current_new_vol += vol
@@ -361,13 +357,13 @@ def process_area_selection_route(df_in, lat_min, lat_max, lon_min, lon_max, cust
                 else:
                     break
             pct_util_final = round((current_new_vol / max_weekly_cap) * 100, 2)
-            msg += f" เติมจุดส่งใกล้เคียงสำเร็จ {added_count} จุด ยอดรวมใหม่เป็น {round(current_new_vol, 2)} ถัง/สัปดาห์ (คิดเป็น {pct_util_final}%)"
+            msg += f" เติมจุดส่งใกล้เคียงสำเร็จ {added_count} จุด ยอดรวมใหม่ขยับขึ้นเป็น {round(current_new_vol, 2)} ถัง/สัปดาห์ (คิดเป็น {pct_util_final}% เข้าเกณฑ์ 90-93%)"
     
     else:
         df_res.loc[selected_subset.index, 'เบอร์รถ'] = 'NEW-CAR-99'
         df_res.loc[selected_subset.index, 'กำลังบรรทุกต่อวัน(ถัง)'] = max_daily_cap
         pct_util = round((total_vol / max_weekly_cap) * 100, 2)
-        msg = f"✅ พื้นที่เลือกอยู่ในเกณฑ์ปกติเป๊ะ (ยอดรวม {round(total_vol, 2)} ถัง/สัปดาห์ คิดเป็น {pct_util}%) สร้างสายส่งใหม่สำเร็จ"
+        msg = f"🟢 พื้นที่เลือกอยู่ในเกณฑ์ปกติเป๊ะ (ยอดรวม {round(total_vol, 2)} ถัง/สัปดาห์ คิดเป็น {pct_util}%) สร้างสายส่งใหม่สำเร็จ"
 
     df_res, _ = assign_vehicle_colors(df_res)
     return df_res, total_vol, max_weekly_cap, msg
@@ -385,7 +381,7 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
         df, rgb_map = process_data(df_main_raw, df_cap_raw, target_year, target_month)
         all_cars = sorted(df['เบอร์รถ'].astype(str).unique())
         
-        tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่ภาพรวม", "⚡ จัดสายส่งใหม่ (สเกล Lat/Lon พร้อมพรีวิวยอดสด)", "📥 สรุปและExport ข้อมูล"])
+        tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่ภาพรวม", "⚡ จัดสายส่งใหม่ (สเกล Lat/Long พร้อมวิเคราะห์เชิงลึก)", "📥 สรุปและExport ข้อมูล"])
         
         # TAB 1: สรุปและแผนที่หลัก
         with tab1:
@@ -419,12 +415,11 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
 
             render_fast_pydeck_map(df, active_cars_tab1)
 
-        # TAB 2: จัดสายส่งใหม่พร้อมพรีวิวยอดส่งสดแบบเรียลไทม์ และปุ่มรีเซ็ตล้างค่า
+        # TAB 2: จัดสายส่งใหม่พร้อมวิเคราะห์เชิงลึกและ Auto-Rebalance
         with tab2:
-            st.subheader("🗺️ กำหนดสเกล Lat / Lon พร้อมพรีวิวยอดส่งและ % Utilization ของรถคันใหม่แบบเรียลไทม์")
-            st.info(f"💡 **ข้อมูลตั้งต้นรถคันใหม่:** กำหนดกำลังส่ง 100% ต่อวัน = **{new_car_daily_capacity} ถัง/วัน** (100% ต่อสัปดาห์ = **{new_car_daily_capacity * 6} ถัง** | เป้าหมายเกณฑ์ปกติ 90-93% คือ **{round(new_car_daily_capacity * 6 * 0.9, 2)} ถึง {round(new_car_daily_capacity * 6 * 0.93, 2)} ถัง/สัปดาห์**)")
+            st.subheader("🗺️ กำหนดกรอบพื้นที่ (Lat/Long) และวิเคราะห์สัดส่วนอัตโนมัติ")
+            st.info(f"💡 **เป้าหมายรถคันใหม่:** กำหนดกำลังส่ง 100% ต่อวัน = **{new_car_daily_capacity} ถัง/วัน** (เป้าหมายเกณฑ์ปกติ 90-93% คือ **{round(new_car_daily_capacity * 6 * 0.9, 2)} ถึง {round(new_car_daily_capacity * 6 * 0.93, 2)} ถัง/สัปดาห์**)")
 
-            # ตรวจสอบค่าเริ่มต้นสำหรับ Slider (เก็บใน session_state เพื่อให้ปุ่มรีเซ็ตทำงานได้)
             lat_min_val = float(df['latitude'].min())
             lat_max_val = float(df['latitude'].max())
             lon_min_val = float(df['longitude'].min())
@@ -442,18 +437,15 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
                     st.session_state['lon_range_val'] = (lon_min_val + 0.05, lon_max_val - 0.05)
                     st.rerun()
 
-            # ส่วนควบคุมสเกล Lat / Lon พร้อมสไลเดอร์ที่ปรับขยายได้อิสระ
             col_lat1, col_lat2 = st.columns(2)
             with col_lat1:
                 lat_range = st.slider("🌐 เลือกช่วงละติจูด (Latitude Range):", lat_min_val, lat_max_val, st.session_state['lat_range_val'], step=0.001, key="lat_slider")
                 st.session_state['lat_range_val'] = lat_range
-                st.caption(f"📌 ค่า Lat ปัจจุบัน: จาก **{lat_range[0]:.4f}** ถึง **{lat_range[1]:.4f}**")
             with col_lat2:
                 lon_range = st.slider("🌐 เลือกช่วงลองจิจูด (Longitude Range):", lon_min_val, lon_max_val, st.session_state['lon_range_val'], step=0.001, key="lon_slider")
                 st.session_state['lon_range_val'] = lon_range
-                st.caption(f"📌 ค่า Lon ปัจจุบัน: จาก **{lon_range[0]:.4f}** ถึง **{lon_range[1]:.4f}**")
 
-            # คำนวณและแสดงพรีวิวยอดส่งในกรอบปัจจุบันทันทีแบบเรียลไทม์
+            # 1. วิเคราะห์จุดพิกัดในกรอบที่เลือก (แสดงว่าเป็นของรถเดิมคันใดบ้าง)
             preview_subset = df[(df['latitude'] >= lat_range[0]) & (df['latitude'] <= lat_range[1]) & 
                                 (df['longitude'] >= lon_range[0]) & (df['longitude'] <= lon_range[1])]
             
@@ -461,38 +453,55 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
             max_weekly_target = new_car_daily_capacity * 6.0
             preview_util_pct = (preview_total_vol / max_weekly_target) * 100 if max_weekly_target > 0 else 0.0
 
-            # กล่องแสดงผลพรีวิวแบบเด่นชัด
             st.markdown("---")
+            st.markdown("### 📊 รายงานวิเคราะห์พื้นที่ในกรอบก่อนสร้างสายส่ง")
+            
             col_p1, col_p2, col_p3 = st.columns(3)
-            col_p1.metric("📍 จำนวนจุดส่งในกรอบพื้นที่", f"{len(preview_subset):,} จุด")
+            col_p1.metric("📍 จำนวนจุดส่งในกรอบ", f"{len(preview_subset):,} จุด")
             col_p2.metric("📦 ยอดส่งรวมในกรอบ", f"{round(preview_total_vol, 2):,} ถัง/สัปดาห์")
             
             if 90 <= preview_util_pct <= 93:
                 col_p3.metric("🎯 % Utilization (พรีวิว)", f"{round(preview_util_pct, 2)}%", "🟢 อยู่ในเกณฑ์เป้าหมาย 90-93%")
             elif preview_util_pct > 93:
-                col_p3.metric("🎯 % Utilization (พรีวิว)", f"{round(preview_util_pct, 2)}%", "🔴 เกินเกณฑ์ (>93%) - ระบบจะตัดขอบนอกออกให้อัตโนมัติ")
+                col_p3.metric("🎯 % Utilization (พรีวิว)", f"{round(preview_util_pct, 2)}%", "🔴 เกินเกณฑ์ (>93%) - ระบบจะตัดขอบนอกออกอัตโนมัติ")
             else:
                 col_p3.metric("🎯 % Utilization (พรีวิว)", f"{round(preview_util_pct, 2)}%", "⚠️ ต่ำกว่าเกณฑ์ (<90%) - ระบบจะดึงจุดใกล้เคียงมาเติมให้")
+
+            # แจ้งข้อมูลว่าจุดในกรอบเดิมเป็นของรถคันใดบ้าง
+            if not preview_subset.empty:
+                car_breakdown = preview_subset.groupby('เบอร์รถ').agg(
+                    จำนวนลูกค้า=('รหัสสมาชิก', 'count'),
+                    ยอดส่งรวม=('ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ', 'sum')
+                ).reset_index()
+                
+                st.markdown("🚚 **พิกัดในกรอบนี้เดิมเป็นของรถคันอ้างอิง:**")
+                st.dataframe(car_breakdown, use_container_width=True)
+            else:
+                st.warning("⚠️ ไม่มีจุดลูกค้าในกรอบพื้นที่นี้ กรุณาขยายกรอบสเกลเพิ่มเติม")
+
             st.markdown("---")
 
-            # แสดงแผนที่นำทางพร้อมเส้นกรอบและแกน Lat/Long แบบคมชัด ซูม เลื่อน ได้อิสระ
+            # แสดงแผนที่นำทางพร้อมเส้นกรอบ
             render_dynamic_axis_pydeck_map(df, all_cars, lat_range[0], lat_range[1], lon_range[0], lon_range[1])
 
-            if st.button("🚀 ประมวลผลสร้างสายส่งใหม่ (NEW-CAR-99) จากกรอบพื้นที่นี้"):
+            if st.button("🚀 ประมวลผลสร้างสายส่งใหม่ (NEW-CAR-99) และปรับสมดุลอัตโนมัติ (Auto Rebalance)"):
                 new_df, tot_vol, max_cap, result_msg = process_area_selection_route(df, lat_range[0], lat_range[1], lon_range[0], lon_range[1], new_car_daily_capacity)
                 st.session_state['df_area_opt'] = new_df
                 st.success(result_msg)
 
             if 'df_area_opt' in st.session_state:
                 st.divider()
-                st.subheader("📋 ผลลัพธ์การจัดสายส่งใหม่ (เพิ่มรถคันใหม่: NEW-CAR-99)")
+                st.subheader("📋 สรุปแผนที่และผลลัพธ์สายส่งใหม่ (หลังระบบปรับสมดุลเข้าเกณฑ์ 90-93%)")
                 current_area_df = st.session_state['df_area_opt']
+                
+                # แสดงสรุป % Utilization ของทุกคันรวมรถใหม่
                 st.dataframe(calculate_vehicle_utilization(current_area_df, target_year, target_month), use_container_width=True)
                 
                 all_cars_opt = sorted(current_area_df['เบอร์รถ'].astype(str).unique())
-                selected_cars_opt = st.multiselect("🎨 เลือกเบอร์รถแสดงผล (ผลลัพธ์สายส่งใหม่):", options=all_cars_opt, default=all_cars_opt, key="opt_area_selector")
+                selected_cars_opt = st.multiselect("🎨 เลือกเบอร์รถแสดงผลบนแผนที่ภาพรวมใหม่:", options=all_cars_opt, default=all_cars_opt, key="opt_area_selector")
                 active_cars_opt = selected_cars_opt if selected_cars_opt else all_cars_opt
                 
+                # แสดงแผนที่ภาพรวมใหม่หลังปรับแต่ง (รถใหม่สีแดงเด่นชัด)
                 render_dynamic_axis_pydeck_map(current_area_df, active_cars_opt, lat_range[0], lat_range[1], lon_range[0], lon_range[1])
                 
                 filtered_opt = current_area_df[current_area_df['เบอร์รถ'].astype(str).isin(active_cars_opt)]
