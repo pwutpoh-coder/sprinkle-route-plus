@@ -157,9 +157,13 @@ def calculate_vehicle_utilization(df, year, month):
         })
     return pd.DataFrame(summary_list)
 
-# 4. ฟังก์ชันแสดงแผนที่ Pydeck แบบมีความละเอียดสูง มีแผนที่พื้นหลัง ซูม/เลื่อนได้สมบูรณ์
+# 4. ฟังก์ชันแสดงแผนที่ Pydeck พร้อมพื้นหลัง Carto และสี color_rgb
 def render_fast_pydeck_map(df_input, selected_cars):
     df_copy = df_input.copy()
+    
+    # ตรวจสอบว่ามีคอลัมน์ color_rgb หรือไม่ หากไม่มีให้สร้างใหม่
+    if 'color_rgb' not in df_copy.columns:
+        df_copy, _ = assign_vehicle_colors(df_copy)
     
     def get_render_color(row):
         car_str = str(row['เบอร์รถ'])
@@ -390,7 +394,9 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
                         render_fast_pydeck_map(current_df, active_cars_opt)
                         
                         filtered_opt = current_df[current_df['เบอร์รถ'].astype(str).isin(active_cars_opt)]
-                        render_limited_dataframe(filtered_opt[existing_cols] if 'existing_cols' in locals() else filtered_opt, f"opt{idx}")
+                        cols_to_show = ['รหัสสมาชิก', 'ชื่อ-นามสกุล', 'เบอร์รถ', 'รอบส่งประจำสัปดาห์', 'ยอดส่ง/เดือน', 'ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ', 'กำลังบรรทุกต่อวัน(ถัง)', 'ที่อยู่จัดส่ง บ้านเลขที่/อาคาร', 'พิกัด Lat/Long']
+                        existing_cols = [c for c in cols_to_show if c in filtered_opt.columns]
+                        render_limited_dataframe(filtered_opt[existing_cols], f"opt{idx}")
                         
                         if st.button(f"เลือกทางเลือกที่ {idx} สำหรับ Export", key=f"btn_opt{idx}"):
                             st.session_state['selected_option_df'] = current_df
