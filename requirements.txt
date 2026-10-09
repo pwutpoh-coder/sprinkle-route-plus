@@ -1,8 +1,7 @@
 streamlit
 pandas
 numpy
-folium
-streamlit-folium
-scikit-learn
 xlsxwriter
 openpyxl
+pydeck
+plotly
