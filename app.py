@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pydeck as pdk
+import plotly.express as px
 import calendar
 import io
 
@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 st.title("📍 Sprinkle Route Plus")
-st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Ultra High-Performance WebGL Engine)")
+st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Interactive Lasso & Box Selection Engine)")
 
 # 2. Sidebar สำหรับอัปโหลดไฟล์และตั้งค่า
 st.sidebar.header("⚙️ ตั้งค่าข้อมูล")
@@ -31,20 +31,17 @@ DAY_MAP = {
     'พฤหัสบดี': 3, 'พฤหัส': 3, 'พฤ': 3,
     'ศุกร์': 4, 'ศ': 4,
     'เสาร์': 5, 'ส': 5
-    # ไม่นับวันอาทิตย์
 }
 
 @st.cache_data
 def get_days_count_in_month(year, month):
-    """ คืนค่า Dictionary นับจำนวนวันแต่ละวันในเดือน (ไม่นับวันอาทิตย์) และจำนวนวันทำการรวมทั้งเดือน """
     cal = calendar.monthcalendar(year, month)
     counts = {}
     total_working_days = 0
     for week in cal:
         for i, day in enumerate(week):
-            if day != 0:
-                if i != 6: # ไม่นับวันอาทิตย์
-                    total_working_days += 1
+            if day != 0 and i != 6:
+                total_working_days += 1
 
     for day_name, day_idx in DAY_MAP.items():
         if len(day_name) > 1 and day_name not in ['พฤหัส', 'พฤ']:
@@ -58,19 +55,15 @@ def get_days_count_in_month(year, month):
 def assign_vehicle_colors(df):
     unique_cars = sorted(df['เบอร์รถ'].astype(str).unique())
     rgb_palette = [
-        [31, 119, 180], [255, 127, 14], [44, 160, 44], [214, 39, 40],
-        [148, 103, 189], [140, 86, 75], [227, 119, 194], [23, 190, 207],
-        [188, 189, 34], [127, 127, 127], [255, 152, 150], [174, 199, 232]
+        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
+        '#9467bd', '#8c564b', '#e377c2', '#17becf',
+        '#bcbd22', '#7f7f7f', '#ff9896', '#aec7e8'
     ]
-    
-    rgb_map = {}
-    for i, car in enumerate(unique_cars):
-        rgb_map[car] = rgb_palette[i % len(rgb_palette)]
-        
-    df['color_rgb'] = df['เบอร์รถ'].astype(str).map(rgb_map)
+    rgb_map = {car: rgb_palette[i % len(rgb_palette)] for i, car in enumerate(unique_cars)}
+    df['color_hex'] = df['เบอร์รถ'].astype(str).map(rgb_map)
     return df, rgb_map
 
-# 3. ฟังก์ชันคำนวณยอดส่งต่อสัปดาห์ระดับบรรทัด ตามตรรกะจำนวนครั้งของวันในรอบส่ง (คอลัมน์ G)
+# 3. ฟังก์ชันคำนวณยอดส่งต่อสัปดาห์ระดับบรรทัด
 def calculate_row_weekly_volume(row, day_counts):
     monthly_vol = float(row.get('ยอดส่ง/เดือน', 0))
     if monthly_vol <= 0:
@@ -137,7 +130,6 @@ def process_data(df_main, df_cap, year, month):
 @st.cache_data
 def calculate_vehicle_utilization(df, year, month):
     summary_list = []
-    
     for car, group in df.groupby('เบอร์รถ'):
         total_monthly_vol = group['ยอดส่ง/เดือน'].sum()
         total_calculated_weekly_vol = group['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ'].sum() 
@@ -159,73 +151,47 @@ def calculate_vehicle_utilization(df, year, month):
             'ยอดรวมส่งทั้งเดือน (ถัง)': total_monthly_vol,
             'ยอดส่งเฉลี่ยต่อสัปดาห์รวม (ถัง)': round(total_calculated_weekly_vol, 2),
             'กำลังบรรทุก 100% ต่อวัน (ถัง)': max_daily_cap,
-            'กำลังบรรทุก 100% ต่อสัปดาห์ (ถัง)': max_weekly_cap,
+            'กำลังบรรทุก 100%ต่อสัปดาห์ (ถัง)': max_weekly_cap,
             '% การใช้งานกำลังบรรทุก (% Utilization)': round(utilization_pct, 2),
             'สถานะ': status
         })
     return pd.DataFrame(summary_list)
 
-# 4. แผนที่ความเร็วสูง WebGL
-def render_fast_pydeck_map(df_input, selected_cars):
+# 4. ฟังก์ชันแสดงแผนที่ Plotly รองรับ Lasso / Box Selection
+def render_plotly_map(df_input, selected_cars, key_name):
     df_copy = df_input.copy()
-    
-    def get_render_color(row):
-        car_str = str(row['เบอร์รถ'])
-        if car_str in selected_cars:
-            return row['color_rgb']
-        return [210, 210, 210, 100]
-
-    df_copy['render_color'] = df_copy.apply(get_render_color, axis=1)
     df_copy['car_str'] = df_copy['เบอร์รถ'].astype(str)
     
-    mean_lat = df_copy['latitude'].mean()
-    mean_lon = df_copy['longitude'].mean()
-
-    view_state = pdk.ViewState(
-        latitude=mean_lat if pd.notnull(mean_lat) else 13.7563,
-        longitude=mean_lon if pd.notnull(mean_lon) else 100.5018,
+    # กรองเฉพาะรถที่เลือกแสดง
+    df_filtered = df_copy[df_copy['car_str'].isin(selected_cars)]
+    
+    fig = px.scatter_mapbox(
+        df_filtered,
+        lat="latitude",
+        lon="longitude",
+        color="car_str",
+        color_discrete_map={car: col for car, col in zip(df_copy['car_str'].unique(), df_copy['color_hex'].unique())},
+        hover_name="รหัสสมาชิก",
+        hover_data=["ชื่อ-นามสกุล", "ยอดส่ง/เดือน", "ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ", "เบอร์รถ"],
         zoom=11,
-        pitch=0
+        height=600
     )
-
-    layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=df_copy,
-        get_position=["longitude", "latitude"],
-        get_fill_color="render_color",
-        get_radius=100,
-        pickable=True,
-        opacity=0.85,
-        stroked=True,
-        get_line_color=[255, 255, 255],
-        line_width_min_pixels=1,
+    
+    fig.update_layout(
+        mapbox_style="carto-positron",
+        margin={"r":0,"t":0,"l":0,"b":0},
+        clickmode='event+select',
+        dragmode='lasso' # เริ่มต้นด้วยโหมดลากคลุมอิสระ (Lasso)
     )
-
-    tooltip = {
-        "html": "<b>🚚 เบอร์รถ:</b> {car_str}<br/>"
-                "<b>🆔 รหัสสมาชิก:</b> {รหัสสมาชิก}<br/>"
-                "<b>👤 ชื่อ:</b> {ชื่อ-นามสกุล}<br/>"
-                "<b>📦 ยอดส่งต่อเดือน:</b> {ยอดส่ง/เดือน} ถัง<br/>"
-                "<b>⚡ ยอดส่งเฉลี่ย/สัปดาห์ (บรรทัดนี้):</b> {ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ} ถัง/สัปดาห์",
-        "style": {
-            "backgroundColor": "#1e293b",
-            "color": "white",
-            "font-family": "sans-serif",
-            "fontSize": "13px",
-            "padding": "10px",
-            "borderRadius": "6px",
-            "zIndex": "999"
-        }
-    }
-
-    st.pydeck_chart(
-        pdk.Deck(
-            layers=[layer],
-            initial_view_state=view_state,
-            tooltip=tooltip,
-            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
-        )
+    
+    selection = st.plotly_chart(
+        fig, 
+        use_container_width=True, 
+        on_select="rerun", 
+        selection_mode=("box", "lasso"),
+        key=key_name
     )
+    return selection
 
 def render_limited_dataframe(df_to_show, key_suffix):
     col_limit, _ = st.columns([1, 2])
@@ -241,77 +207,90 @@ def render_limited_dataframe(df_to_show, key_suffix):
         st.dataframe(df_to_show, use_container_width=True)
     else:
         st.dataframe(df_to_show.head(limit), use_container_width=True)
-        st.caption(f"⚡ แสดง {limit} รายการแรกเพื่อความรวดเร็ว (ดาวน์โหลดทั้งหมดได้ที่ Tab 3)")
+        st.caption(f"⚡ แสดง {limit} รายการแรกเพื่อความรวดเร็ว")
 
-# 5. อัลกอริทึมตัดสายส่งใหม่รองรับการเลือกพื้นที่อ้างอิง (เบอร์รถต้นแบบ หรือ สมาชิกต้นแบบ)
-def rebalance_routes_strict_utilization(df_in, target_cars, fix_stay_ids, fix_move_ids, reference_type, reference_value, target_min_pct=90.0, target_max_pct=93.0, new_car_capacity=200.0):
+# 5. อัลกอริทึมจัดการพื้นที่ลากคลุม (Lasso Selection Rebalancing) ให้ได้เกณฑ์ 90-93% และเกลี่ยส่วนที่เหลือ
+def process_lasso_selection_route(df_in, selected_indices, target_min=90.0, target_max=93.0, new_car_capacity=200.0):
     df_res = df_in.copy()
-    
-    if fix_move_ids:
-        df_res.loc[df_res['รหัสสมาชิก'].isin(fix_move_ids), 'เบอร์รถ'] = 'NEW-CAR-11'
+    max_weekly_cap = new_car_capacity * 6.0
+    target_min_vol = max_weekly_cap * (target_min / 100.0) # 90%
+    target_max_vol = max_weekly_cap * (target_max / 100.0) # 93%
 
-    new_car_target_min = new_car_capacity * 6.0 * (target_min_pct / 100.0)
-    new_car_target_max = new_car_capacity * 6.0 * (target_max_pct / 100.0)
+    if not selected_indices:
+        return df_res, 0, 0, "ไม่พบจุดพิกัดที่ถูกลากคลุม กรุณาใช้เครื่องมือ Lasso หรือ Box เลือกพื้นที่บนแผนที่"
 
-    # คำนวณจุดศูนย์กลางอ้างอิง (Reference Center) สำหรับสายส่งใหม่
-    ref_center = None
-    if reference_type == "อ้างอิงตามพื้นที่เบอร์รถเดิม" and reference_value:
-        ref_rows = df_res[df_res['เบอร์รถ'].astype(str) == str(reference_value)]
-        if not ref_rows.empty:
-            ref_center = ref_rows[['latitude', 'longitude']].values.mean(axis=0)
-    elif reference_type == "อ้างอิงตามพิกัดรหัสสมาชิกรายใดรายหนึ่ง" and reference_value:
-        ref_rows = df_res[df_res['รหัสสมาชิก'].astype(str) == str(reference_value)]
-        if not ref_rows.empty:
-            ref_center = ref_rows[['latitude', 'longitude']].values[0]
+    # ดึงจุดที่ผู้ใช้ลากคลุมมาเป็นกลุ่มตั้งต้นของรถคันใหม่ ('NEW-CAR-99')
+    selected_subset = df_res.iloc[selected_indices].copy()
+    total_vol = selected_subset['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ'].sum()
 
-    for car in target_cars:
-        car_rows = df_res[df_res['เบอร์รถ'].astype(str) == str(car)]
-        if car_rows.empty:
-            continue
-            
-        car_cap_daily = car_rows['กำลังบรรทุกต่อวัน(ถัง)'].iloc[0] if 'กำลังบรรทุกต่อวัน(ถัง)' in car_rows.columns else 200.0
-        car_weekly_cap = car_cap_daily * 6.0
-        car_target_max_vol = car_weekly_cap * (target_max_pct / 100.0)
-        car_target_min_vol = car_weekly_cap * (target_min_pct / 100.0)
+    msg = ""
+    # กรณี 1: ยอดเกินเกณฑ์ (>93%) -> ตัดขอบนอกออกอัตโนมัติจนกว่าจะเข้าเกณฑ์เป้าหมาย
+    if total_vol > target_max_vol:
+        # คำนวณจุดศูนย์กลางของพื้นที่ที่ลากคลุม เพื่อตัดจุดที่อยู่รอบนอกสุดออกก่อน
+        center_lat = selected_subset['latitude'].mean()
+        center_lon = selected_subset['longitude'].mean()
+        selected_subset['dist_from_center'] = np.sqrt((selected_subset['latitude'] - center_lat)**2 + (selected_subset['longitude'] - center_lon)**2)
+        selected_subset = selected_subset.sort_values(by='dist_from_center', ascending=False) # ไกลสุดอยู่บนสุด
 
-        current_weekly_vol = car_rows['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ'].sum()
-        
-        if current_weekly_vol > car_target_max_vol:
-            eligible_candidates = car_rows[~car_rows['รหัสสมาชิก'].isin(fix_stay_ids)].copy()
-            if eligible_candidates.empty:
-                continue
+        accumulated_vol = total_vol
+        valid_indices = []
+        dropped_indices = []
 
-            # จัดเรียงลำดับจุดส่งที่จะดึงออก: หากมีจุดศูนย์กลางอ้างอิง ให้เลือกจุดที่ใกล้ (หรือไกล) กับจุดอ้างอิงตามความเหมาะสม
-            if ref_center is not None:
-                coords = eligible_candidates[['latitude', 'longitude']].values
-                # คำนวณระยะห่างจากจุดอ้างอิง เพื่อดึงจุดที่อยู่ใกล้โซนใหม่มาจัดเข้าสายส่งใหม่ก่อน
-                eligible_candidates['dist_to_ref'] = np.linalg.norm(coords - ref_center, axis=1)
-                eligible_candidates = eligible_candidates.sort_values(by='dist_to_ref', ascending=True)
+        for idx, row in selected_subset.iterrows():
+            if accumulated_vol > target_max_vol:
+                accumulated_vol -= row['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ']
+                dropped_indices.append(idx)
             else:
-                if len(eligible_candidates) >= 2:
-                    coords = eligible_candidates[['latitude', 'longitude']].values
-                    center = coords.mean(axis=0)
-                    eligible_candidates['dist_to_center'] = np.linalg.norm(coords - center, axis=1)
-                    eligible_candidates = eligible_candidates.sort_values(by='dist_to_center', ascending=False)
+                valid_indices.append(idx)
 
-            for idx, candidate in eligible_candidates.iterrows():
-                new_car_current_vol = df_res[df_res['เบอร์รถ'] == 'NEW-CAR-11']['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ'].sum()
-                
-                if new_car_current_vol >= new_car_target_max:
+        df_res.loc[valid_indices, 'เบอร์รถ'] = 'NEW-CAR-99'
+        msg = f"⚠️ พื้นที่ลากคลุมมียอดส่งเกินเกณฑ์ (>93%) ระบบได้ทำการตัดขอบนอกออกอัตโนมัติ คงเหลือยอดส่ง {round(accumulated_vol, 2)} ถัง/สัปดาห์ (คิดเป็น {round((accumulated_vol/max_weekly_cap)*100, 2)}%) เข้าสู่เกณฑ์ปกติ"
+        
+        # นำจุดที่โดนตัดออกไปเกลี่ยเพิ่มให้กับเบอร์รถเดิมที่อยู่ใกล้ที่สุด
+        for drop_idx in dropped_indices:
+            drop_row = df_res.loc[drop_idx]
+            # หารรถคันเดิมที่ใกล้ที่สุด (ยกเว้น NEW-CAR-99)
+            other_cars = df_res[df_res['เบอร์รถ'] != 'NEW-CAR-99']
+            if not other_cars.empty:
+                dists = np.sqrt((other_cars['latitude'] - drop_row['latitude'])**2 + (other_cars['longitude'] - drop_row['longitude'])**2)
+                nearest_car = other_cars.loc[dists.idxmin(), 'เบอร์รถ']
+                df_res.loc[drop_idx, 'เบอร์รถ'] = nearest_car
+
+    # กรณี 2: ยอดต่ำกว่าเกณฑ์ (<90%) -> แจ้งเตือนว่ายอดไม่ครบ และแนะนำให้ลากคลุมเพิ่ม หรือระบบช่วยดึงจุดใกล้เคียงมาเติมให้ครบ
+    elif total_vol < target_min_vol:
+        needed_vol = target_min_vol - total_vol
+        msg = f"⚠️ ยอดส่งต่ำกว่าเกณฑ์ (<90% โดยมียอด {round(total_vol, 2)} ถัง/สัปดาห์ หรือ {round((total_vol/max_weekly_cap)*100, 2)}%) ระบบกำลังดึงจุดส่งรอบข้างที่ใกล้ที่สุดมาเติมให้ครบช่วง 90-93%..."
+        
+        df_res.loc[selected_subset.index, 'เบอร์รถ'] = 'NEW-CAR-99'
+        current_new_vol = total_vol
+
+        # หาจุดภายนอกที่อยู่ใกล้กลุ่มนี้ที่สุดมาเติม
+        outside_df = df_res[df_res['เบอร์รถ'] != 'NEW-CAR-99'].copy()
+        if not outside_df.empty:
+            center_lat = selected_subset['latitude'].mean()
+            center_lon = selected_subset['longitude'].mean()
+            outside_df['dist'] = np.sqrt((outside_df['latitude'] - center_lat)**2 + (outside_df['longitude'] - center_lon)**2)
+            outside_df = outside_df.sort_values(by='dist', ascending=True)
+
+            added_count = 0
+            for idx, row in outside_df.iterrows():
+                if current_new_vol < target_min_vol:
+                    vol = row['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ']
+                    if current_new_vol + vol <= target_max_vol:
+                        df_res.loc[idx, 'เบอร์รถ'] = 'NEW-CAR-99'
+                        current_new_vol += vol
+                        added_count += 1
+                else:
                     break
-                    
-                cand_vol = candidate['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ']
-                
-                if (current_weekly_vol - cand_vol) >= car_target_min_vol:
-                    if (new_car_current_vol + cand_vol) <= new_car_target_max:
-                        df_res.loc[idx, 'เบอร์รถ'] = 'NEW-CAR-11'
-                        current_weekly_vol -= cand_vol
-                        
-                if car_target_min_vol <= current_weekly_vol <= car_target_max_vol:
-                    break
+            msg += f" เติมจุดส่งใกล้เคียงสำเร็จ {added_count} จุด ยอดรวมใหม่เป็น {round(current_new_vol, 2)} ถัง/สัปดาห์ ({round((current_new_vol/max_weekly_cap)*100, 2)}%)"
+    
+    # กรณี 3: อยู่ในเกณฑ์พอดี (90-93%)
+    else:
+        df_res.loc[selected_subset.index, 'เบอร์รถ'] = 'NEW-CAR-99'
+        msg = f"✅ พื้นที่ลากคลุมอยู่ในเกณฑ์ปกติเป๊ะ ({round((total_vol/max_weekly_cap)*100, 2)}% หรือ {round(total_vol, 2)} ถัง/สัปดาห์) สร้างสายส่งใหม่สำเร็จ"
 
     df_res, _ = assign_vehicle_colors(df_res)
-    return df_res
+    return df_res, total_vol, max_weekly_cap, msg
 
 # 6. ประมวลผลหลักเมื่ออัปโหลดไฟล์
 if uploaded_main_file is not None and uploaded_cap_file is not None:
@@ -326,105 +305,76 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
         df, rgb_map = process_data(df_main_raw, df_cap_raw, target_year, target_month)
         all_cars = sorted(df['เบอร์รถ'].astype(str).unique())
         
-        tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่สีพิกัด", "⚡ จัดสายส่งใหม่ (3 ทางเลือก)", "📥 สรุปและExport ข้อมูล"])
+        tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่ภาพรวม", "⚡ จัดสายส่งใหม่ (ลากคลุมพื้นที่ Lasso/Box)", "📥 สรุปและExport ข้อมูล"])
         
         # TAB 1: สรุปและแผนที่หลัก
         with tab1:
-            st.subheader(f"📌 สรุปกำลังส่งรายสัปดาห์เทียบเปอร์เซ็นต์ (% Utilization) [เดือน {calendar.month_name[target_month]} {target_year}: คำนวณจากรอบส่งประจำสัปดาห์ คอลัมน์ G]")
+            st.subheader(f"📌 สรุปกำลังส่งรายสัปดาห์เทียบเปอร์เซ็นต์ (% Utilization) [เดือน {calendar.month_name[target_month]} {target_year}]")
             veh_summary = calculate_vehicle_utilization(df, target_year, target_month)
             st.dataframe(veh_summary, use_container_width=True)
             
             over_limit_cars = veh_summary[veh_summary['% การใช้งานกำลังบรรทุก (% Utilization)'] > 93]['เบอร์รถ'].tolist()
             if over_limit_cars:
-                st.warning(f"🚨 รถที่มียอดส่งเกินเกณฑ์ (>93%) ที่ต้องพิจารณาจัดสายส่งใหม่ ได้แก่: {', '.join(map(str, over_limit_cars))}")
+                st.warning(f"🚨 รถที่มียอดส่งเกินเกณฑ์ (>93%) ได้แก่: {', '.join(map(str, over_limit_cars))}")
             else:
-                st.success("✅ ทุกคันอยู่ในเกณฑ์ปกติหรือต่ำกว่าเกณฑ์ ไม่มียอดส่งเกินเกณฑ์")
+                st.success("✅ ทุกคันอยู่ในเกณฑ์ปกติหรือต่ำกว่าเกณฑ์")
             
             st.divider()
-            st.subheader("🗺️ แผนที่พิกัดส่งน้ำดื่ม (ประมวลผลความเร็วสูงพิเศษ WebGL)")
-            
-            selected_cars_tab1 = st.multiselect(
-                "🎨 เลือกเบอร์รถเพื่อเน้นแสดงผลพิกัดบนแผนที่:",
-                options=all_cars,
-                default=all_cars,
-                key="tab1_car_selector"
-            )
+            st.subheader("🗺️ แผนที่แสดงพิกัดส่งน้ำดื่มภาพรวม")
+            selected_cars_tab1 = st.multiselect("🎨 เลือกเบอร์รถแสดงผล:", options=all_cars, default=all_cars, key="tab1_car_selector")
             active_cars_tab1 = selected_cars_tab1 if selected_cars_tab1 else all_cars
-            
-            render_fast_pydeck_map(df, active_cars_tab1)
+            render_plotly_map(df, active_cars_tab1, "map_tab1")
 
-            st.subheader("📋 ตารางรายละเอียดพิกัดงาน (พร้อมยอดส่งเฉลี่ย/สัปดาห์รายบรรทัด)")
-            filtered_df_tab1 = df[df['เบอร์รถ'].astype(str).isin(active_cars_tab1)]
-            cols_to_show = ['รหัสสมาชิก', 'ชื่อ-นามสกุล', 'เบอร์รถ', 'รอบส่งประจำสัปดาห์', 'ยอดส่ง/เดือน', 'ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ', 'กำลังบรรทุกต่อวัน(ถัง)', 'ที่อยู่จัดส่ง บ้านเลขที่/อาคาร', 'พิกัด Lat/Long']
-            existing_cols = [c for c in cols_to_show if c in filtered_df_tab1.columns]
-            render_limited_dataframe(filtered_df_tab1[existing_cols], "tab1")
-
-        # TAB 2: จัดสายส่งใหม่ (พร้อมตัวเลือกกำหนดพื้นที่ใกล้เคียง)
+        # TAB 2: จัดสายส่งใหม่ด้วยการลากคลุมพื้นที่ (Lasso / Box Select)
         with tab2:
-            st.subheader("⚙️ เงื่อนไขการจัดสายส่งใหม่ (ควบคุม % Utilization ให้อยู่ในช่วง 90% - 93%)")
-            
-            # เพิ่มฟีเจอร์เลือกพื้นที่ใกล้เคียงสำหรับสายส่งใหม่
-            st.markdown("📍 **กำหนดจุดศูนย์กลาง / พื้นที่เป้าหมายของสายส่งใหม่ (รถคันใหม่)**")
-            ref_col1, ref_col2 = st.columns(2)
-            with ref_col1:
-                ref_type = st.radio(
-                    "เลือกรูปแบบการอ้างอิงพื้นที่สำหรับสายส่งใหม่:",
-                    options=["อ้างอิงตามพื้นที่เบอร์รถเดิม", "อ้างอิงตามพิกัดรหัสสมาชิกรายใดรายหนึ่ง"]
-                )
-            with ref_col2:
-                if ref_type == "อ้างอิงตามพื้นที่เบอร์รถเดิม":
-                    ref_val = st.selectbox("เลือกเบอร์รถต้นแบบที่ต้องการให้สายส่งใหม่อยู่ใกล้พื้นที่:", options=all_cars)
-                else:
-                    ref_val = st.selectbox("เลือกรหัสสมาชิก / ลูกค้าต้นแบบ:", options=df['รหัสสมาชิก'].unique())
+            st.subheader("🖱️ จัดสายส่งใหม่ด้วยการลากคลุมพื้นที่บนแผนที่ (Interactive Lasso / Box Select)")
+            st.info("💡 **วิธีใช้งาน:** ใช้เครื่องมือ **Lasso Select (ไอคอนบ่วงบาศ)** หรือ **Box Select (ไอคอนสี่เหลี่ยม)** ที่มุมขวาบนของแผนที่ด้านล่าง ลากคลุมพื้นที่ลูกค้าที่คุณต้องการสร้างเป็นสายส่งใหม่ ระบบจะทำการคำนวณและปรับสัดส่วนให้อยู่ในเกณฑ์ 90-93% อัตโนมัติ")
 
-            st.divider()
-            col_a, col_b = st.columns(2)
-            with col_a:
-                selected_source_cars = st.multiselect("🚚 เลือกเฉพาะเบอร์รถที่จะนำมาจัดสายส่งใหม่:", options=all_cars, default=over_limit_cars if over_limit_cars else all_cars, key="source_cars_tab2")
-            with col_b:
-                fix_no = st.multiselect("🔒 รหัสสมาชิกที่ไม่ยอมให้ย้าย (Fix Stay)", df['รหัสสมาชิก'].unique(), key="fix_stay_tab2")
+            selected_cars_tab2 = st.multiselect("🎨 เลือกเบอร์รถบนแผนที่เพื่อช่วยในการลากคลุม:", options=all_cars, default=all_cars, key="tab2_car_selector")
+            active_cars_tab2 = selected_cars_tab2 if selected_cars_tab2 else all_cars
+
+            # เรียกใช้ Plotly Map พร้อมรับข้อมูลการลากคลุม (Selection Event)
+            selection_event = render_plotly_map(df, active_cars_tab2, "map_tab2")
+
+            # ตรวจสอบจุดพิกัดที่ผู้ใช้ลากคลุมเลือก
+            selected_indices = []
+            if selection_event and "point_indices" in selection_event.get("selection", {}):
+                # แปลงจุดที่เลือกในแบบ filtered กลับเป็น index ของ df หลัก
+                filtered_df_temp = df[df['เบอร์รถ'].astype(str).isin(active_cars_tab2)].reset_index(drop=True)
+                selected_filtered_indices = selection_event["selection"]["point_indices"]
+                if selected_filtered_indices:
+                    selected_indices = filtered_df_temp.iloc[selected_filtered_indices].index.tolist()
+
+            if selected_indices:
+                st.success(f"🎯 คุณลากคลุมเลือกจุดส่งทั้งหมด {len(selected_indices)} จุด")
                 
-            col_c, col_d = st.columns(2)
-            with col_c:
-                fix_move = st.multiselect("🚚 รหัสสมาชิกที่บังคับย้ายไปรถคันใหม่", df['รหัสสมาชิก'].unique(), key="fix_move_tab2")
-            with col_d:
-                target_pct_range = st.slider("ช่วงเป้าหมาย % กำลังบรรทุกของรถคันใหม่และคันที่ถูกตัด", 85.0, 98.0, (90.0, 93.0), step=0.5, key="slider_tab2")
+                if st.button("🚀 ประมวลผลสร้างสายส่งใหม่จากพื้นที่ที่ลากคลุม (ปรับเข้าเกณฑ์ 90-93%)"):
+                    new_df, tot_vol, max_cap, result_msg = process_lasso_selection_route(df, selected_indices)
+                    st.session_state['df_lasso_opt'] = new_df
+                    st.toast(result_msg, icon="📌")
+                    st.success(result_msg)
 
-            if st.button("🚀 ประมวลผลสร้าง 3 ทางเลือกตามพื้นที่อ้างอิง (เป้าหมาย 90-93%)"):
-                source_cars = selected_source_cars if selected_source_cars else all_cars
-                min_p, max_p = target_pct_range
+            if 'df_lasso_opt' in st.session_state:
+                st.divider()
+                st.subheader("📋 ผลลัพธ์การจัดสายส่งใหม่ (เพิ่มรถคันใหม่: NEW-CAR-99)")
+                current_lasso_df = st.session_state['df_lasso_opt']
+                st.dataframe(calculate_vehicle_utilization(current_lasso_df, target_year, target_month), use_container_width=True)
                 
-                st.session_state['df_opt1'] = rebalance_routes_strict_utilization(df, source_cars, fix_no, fix_move, ref_type, ref_val, target_min_pct=min_p, target_max_pct=max_p)
-                st.session_state['df_opt2'] = rebalance_routes_strict_utilization(df, source_cars, fix_no, fix_move, ref_type, ref_val, target_min_pct=min_p-1.0, target_max_pct=max_p)
-                st.session_state['df_opt3'] = rebalance_routes_strict_utilization(df, source_cars, fix_no, fix_move, ref_type, ref_val, target_min_pct=min_p, target_max_pct=max_p+1.0)
-                st.success("คำนวณและปรับสัดส่วนกำลังบรรทุกตามพื้นที่อ้างอิงสำเร็จ!")
-
-            if 'df_opt1' in st.session_state:
-                opt_tab1, opt_tab2, opt_tab3 = st.tabs(["ทางเลือกที่ 1 (เกณฑ์เป๊ะ 90-93%)", "ทางเลือกที่ 2 (เน้นตัดออกกระจาย)", "ทางเลือกที่ 3 (เน้นรถคันใหม่เต็มกำลัง)"])
-
-                for idx, (tab, opt_key) in enumerate(zip([opt_tab1, opt_tab2, opt_tab3], ['df_opt1', 'df_opt2', 'df_opt3']), 1):
-                    with tab:
-                        current_df = st.session_state[opt_key]
-                        st.dataframe(calculate_vehicle_utilization(current_df, target_year, target_month), use_container_width=True)
-                        
-                        all_cars_opt = sorted(current_df['เบอร์รถ'].astype(str).unique())
-                        selected_cars_opt = st.multiselect(f"🎨 เลือกเบอร์รถแสดงผล (Option {idx}):", options=all_cars_opt, default=all_cars_opt, key=f"opt{idx}_selector")
-                        active_cars_opt = selected_cars_opt if selected_cars_opt else all_cars_opt
-                        
-                        render_fast_pydeck_map(current_df, active_cars_opt)
-                        
-                        filtered_opt = current_df[current_df['เบอร์รถ'].astype(str).isin(active_cars_opt)]
-                        render_limited_dataframe(filtered_opt[existing_cols], f"opt{idx}")
-                        
-                        if st.button(f"เลือกทางเลือกที่ {idx} สำหรับ Export", key=f"btn_opt{idx}"):
-                            st.session_state['selected_option_df'] = current_df
-                            st.success(f"บันทึกทางเลือกที่ {idx} เรียบร้อยแล้ว")
+                all_cars_opt = sorted(current_lasso_df['เบอร์รถ'].astype(str).unique())
+                selected_cars_opt = st.multiselect("🎨 เลือกเบอร์รถแสดงผล (ผลลัพธ์สายส่งใหม่):", options=all_cars_opt, default=all_cars_opt, key="opt_lasso_selector")
+                active_cars_opt = selected_cars_opt if selected_cars_opt else all_cars_opt
+                
+                render_plotly_map(current_lasso_df, active_cars_opt, "map_lasso_result")
+                
+                if st.button("💾 บันทึกผลลัพธ์นี้สำหรับ Export ข้อมูล"):
+                    st.session_state['selected_option_df'] = current_lasso_df
+                    st.success("บันทึกข้อมูลสายส่งใหม่เรียบร้อยแล้ว สามารถไปที่ Tab 3 เพื่อดาวน์โหลดได้ทันที")
 
         # TAB 3: Export ข้อมูล
         with tab3:
-            st.subheader("📥 Export ข้อมูล")
+            st.subheader("📥 Export ข้อมูลแผนงานจัดสายส่ง")
             final_export_df = st.session_state.get('selected_option_df', df)
-            cols_to_drop = ['latitude', 'longitude', 'color_rgb']
+            cols_to_drop = ['latitude', 'longitude', 'color_hex']
             clean_export_df = final_export_df.drop(columns=[c for c in cols_to_drop if c in final_export_df.columns])
 
             output = io.BytesIO()
@@ -432,7 +382,7 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
                 clean_export_df.to_excel(writer, index=False, sheet_name='Sprinkle_Route_Plan')
             
             st.download_button(
-                label="🟢 ดาวน์โหลดไฟล์ Excel (Sprinkle Route Plan)",
+                label="🟢 ดาวน์โหลดไฟล์ Excel แผนงานจัดสายส่ง (Sprinkle Route Plan)",
                 data=output.getvalue(),
                 file_name=f'Sprinkle_Route_Plan_{target_year}_{target_month}.xlsx',
                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
