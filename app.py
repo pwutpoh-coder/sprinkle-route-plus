@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 st.title("📍 Sprinkle Route Plus")
-st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Ultra High-Performance WebGL Engine)")
+st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Ultra High-Performance WebGL Engine with Visual Bounding Box Guide)")
 
 # 2. Sidebar สำหรับอัปโหลดไฟล์และตั้งค่า
 st.sidebar.header("⚙️ ตั้งค่าข้อมูล")
@@ -157,42 +157,66 @@ def calculate_vehicle_utilization(df, year, month):
         })
     return pd.DataFrame(summary_list)
 
-# 4. ฟังก์ชันแสดงแผนที่ Pydeck แบบคมชัด ซูม เลื่อนได้
-def render_fast_pydeck_map(df_input, selected_cars):
+# 4. ฟังก์ชันแสดงแผนที่ Pydeck พร้อมเส้นกรอบพื้นที่ (Bounding Box Guide Lines)
+def render_bounding_box_pydeck_map(df_input, selected_cars, lat_min, lat_max, lon_min, lon_max):
     df_copy = df_input.copy()
     if 'color_rgb' not in df_copy.columns:
         df_copy, _ = assign_vehicle_colors(df_copy)
     
     def get_render_color(row):
         car_str = str(row['เบอร์รถ'])
-        if car_str in selected_cars:
+        # เน้นจุดที่อยู่ในกรอบพื้นที่เลือกให้เป็นสีเข้ม/แดงเด่นชัด นอกนั้นโปร่งแสง
+        if lat_min <= row['latitude'] <= lat_max and lon_min <= row['longitude'] <= lon_max:
+            return [255, 0, 0, 220] # จุดในกรอบเลือก (สีแดงเด่นชัด)
+        elif car_str in selected_cars:
             return row['color_rgb']
-        return [210, 210, 210, 100]
+        return [200, 200, 200, 50]
 
     df_copy['render_color'] = df_copy.apply(get_render_color, axis=1)
     df_copy['car_str'] = df_copy['เบอร์รถ'].astype(str)
     
-    mean_lat = df_copy['latitude'].mean()
-    mean_lon = df_copy['longitude'].mean()
+    mean_lat = (lat_min + lat_max) / 2.0
+    mean_lon = (lon_min + lon_max) / 2.0
 
     view_state = pdk.ViewState(
-        latitude=mean_lat if pd.notnull(mean_lat) else 13.7563,
-        longitude=mean_lon if pd.notnull(mean_lon) else 100.5018,
+        latitude=mean_lat,
+        longitude=mean_lon,
         zoom=11,
         pitch=0
     )
 
-    layer = pdk.Layer(
+    # 1. เลเยอร์จุดพิกัดลูกค้า
+    scatter_layer = pdk.Layer(
         "ScatterplotLayer",
         data=df_copy,
         get_position=["longitude", "latitude"],
         get_fill_color="render_color",
-        get_radius=120,
+        get_radius=100,
         pickable=True,
-        opacity=0.9,
+        opacity=0.85,
         stroked=True,
         get_line_color=[255, 255, 255],
         line_width_min_pixels=1,
+    )
+
+    # 2. เลเยอร์เส้นกรอบพื้นที่ (Bounding Box Guide Lines)
+    box_coords = [
+        [lon_min, lat_min],
+        [lon_max, lat_min],
+        [lon_max, lat_max],
+        [lon_min, lat_max],
+        [lon_min, lat_min]
+    ]
+    box_data = [{"path": box_coords}]
+    
+    line_layer = pdk.Layer(
+        "PathLayer",
+        data=box_data,
+        get_path="path",
+        get_color=[255, 140, 0, 255], # เส้นสีส้มเด่นชัด
+        width_scale=20,
+        width_min_pixels=3,
+        pickable=False
     )
 
     tooltip = {
@@ -214,7 +238,7 @@ def render_fast_pydeck_map(df_input, selected_cars):
 
     st.pydeck_chart(
         pdk.Deck(
-            layers=[layer],
+            layers=[line_layer, scatter_layer],
             initial_view_state=view_state,
             tooltip=tooltip,
             map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
@@ -237,25 +261,23 @@ def render_limited_dataframe(df_to_show, key_suffix):
         st.dataframe(df_to_show.head(limit), use_container_width=True)
         st.caption(f"⚡ แสดง {limit} รายการแรกเพื่อความรวดเร็ว")
 
-# 5. ฟังก์ชันจัดสายส่งใหม่ด้วยการเลือกพื้นที่เป้าหมาย (Bounding Box / Area Selection) + Auto Rebalance
+# 5. ฟังก์ชันจัดสายส่งใหม่ด้วยการเลือกพื้นที่ (Bounding Box Selection) + Auto Rebalance
 def process_area_selection_route(df_in, lat_min, lat_max, lon_min, lon_max, target_min=90.0, target_max=93.0, new_car_capacity=200.0):
     df_res = df_in.copy()
     max_weekly_cap = new_car_capacity * 6.0
     target_min_vol = max_weekly_cap * (target_min / 100.0) # 90%
     target_max_vol = max_weekly_cap * (target_max / 100.0) # 93%
 
-    # กรองจุดพิกัดที่อยู่ในพื้นที่เลือก
     mask = (df_res['latitude'] >= lat_min) & (df_res['latitude'] <= lat_max) & \
            (df_res['longitude'] >= lon_min) & (df_res['longitude'] <= lon_max)
     
     selected_subset = df_res[mask].copy()
     if selected_subset.empty:
-        return df_res, 0, 0, "⚠️ ไม่พบจุดพิกัดในพื้นที่ที่คุณเลือก กรุณาปรับช่วงพิกัด Lat/Lon ให้ครอบคลุมจุดส่ง"
+        return df_res, 0, 0, "⚠️ ไม่พบจุดพิกัดในกรอบพื้นที่ที่คุณเลือก กรุณาปรับขยายสเกล Lat/Lon ให้ครอบคลุมจุดส่ง"
 
     total_vol = selected_subset['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ'].sum()
     msg = ""
 
-    # กรณี 1: ยอดเกินเกณฑ์ (>93%) -> ตัดขอบนอกออกอัตโนมัติจนกว่าจะเข้าเกณฑ์ปกติ และเกลี่ยให้รถใกล้เคียง
     if total_vol > target_max_vol:
         center_lat = selected_subset['latitude'].mean()
         center_lon = selected_subset['longitude'].mean()
@@ -284,7 +306,6 @@ def process_area_selection_route(df_in, lat_min, lat_max, lon_min, lon_max, targ
                 nearest_car = other_cars.loc[dists.idxmin(), 'เบอร์รถ']
                 df_res.loc[drop_idx, 'เบอร์รถ'] = nearest_car
 
-    # กรณี 2: ยอดต่ำกว่าเกณฑ์ (<90%) -> แจ้งเตือนและดึงจุดส่งใกล้เคียงมาเติมให้ครบช่วง 90-93%
     elif total_vol < target_min_vol:
         msg = f"⚠️ ยอดส่งต่ำกว่าเกณฑ์ (<90% โดยมียอด {round(total_vol, 2)} ถัง/สัปดาห์ หรือ {round((total_vol/max_weekly_cap)*100, 2)}%) ระบบกำลังดึงจุดส่งรอบข้างที่ใกล้ที่สุดมาเติมให้ครบช่วง 90-93%..."
         
@@ -310,7 +331,6 @@ def process_area_selection_route(df_in, lat_min, lat_max, lon_min, lon_max, targ
                     break
             msg += f" เติมจุดส่งใกล้เคียงสำเร็จ {added_count} จุด ยอดรวมใหม่เป็น {round(current_new_vol, 2)} ถัง/สัปดาห์ ({round((current_new_vol/max_weekly_cap)*100, 2)}%)"
     
-    # กรณี 3: อยู่ในเกณฑ์พอดี (90-93%)
     else:
         df_res.loc[selected_subset.index, 'เบอร์รถ'] = 'NEW-CAR-99'
         msg = f"✅ พื้นที่เลือกอยู่ในเกณฑ์ปกติเป๊ะ ({round((total_vol/max_weekly_cap)*100, 2)}% หรือ {round(total_vol, 2)} ถัง/สัปดาห์) สร้างสายส่งใหม่สำเร็จ"
@@ -331,7 +351,7 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
         df, rgb_map = process_data(df_main_raw, df_cap_raw, target_year, target_month)
         all_cars = sorted(df['เบอร์รถ'].astype(str).unique())
         
-        tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่ภาพรวม", "⚡ จัดสายส่งใหม่ (เลือกพื้นที่เฉพาะจุด)", "📥 สรุปและExport ข้อมูล"])
+        tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่ภาพรวม", "⚡ จัดสายส่งใหม่ (สเกล Lat/Lon พร้อมเส้นกรอบพื้นที่)", "📥 สรุปและExport ข้อมูล"])
         
         # TAB 1: สรุปและแผนที่หลัก
         with tab1:
@@ -346,32 +366,50 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
                 st.success("✅ ทุกคันอยู่ในเกณฑ์ปกติหรือต่ำกว่าเกณฑ์")
             
             st.divider()
-            st.subheader("🗺️ แผนที่พิกัดส่งน้ำดื่ม (WebGL Engine - รองรับซูม เลื่อน พื้นหลังคมชัด)")
+            st.subheader("🗺️ แผนที่พิกัดส่งน้ำดื่มภาพรวม")
             selected_cars_tab1 = st.multiselect("🎨 เลือกเบอร์รถแสดงผล:", options=all_cars, default=all_cars, key="tab1_car_selector")
             active_cars_tab1 = selected_cars_tab1 if selected_cars_tab1 else all_cars
+            
+            def render_fast_pydeck_map(df_input, selected_cars):
+                df_copy = df_input.copy()
+                if 'color_rgb' not in df_copy.columns:
+                    df_copy, _ = assign_vehicle_colors(df_copy)
+                def get_render_color(row):
+                    return row['color_rgb'] if str(row['เบอร์รถ']) in selected_cars else [210, 210, 210, 100]
+                df_copy['render_color'] = df_copy.apply(get_render_color, axis=1)
+                df_copy['car_str'] = df_copy['เบอร์รถ'].astype(str)
+                view_state = pdk.ViewState(latitude=df_copy['latitude'].mean(), longitude=df_copy['longitude'].mean(), zoom=11, pitch=0)
+                layer = pdk.Layer("ScatterplotLayer", data=df_copy, get_position=["longitude", "latitude"], get_fill_color="render_color", get_radius=120, pickable=True, opacity=0.9, stroked=True, get_line_color=[255, 255, 255], line_width_min_pixels=1)
+                tooltip = {"html": "<b>🚚 เบอร์รถ:</b> {car_str}<br/><b>🆔 รหัสสมาชิก:</b> {รหัสสมาชิก}<br/><b>👤 ชื่อ:</b> {ชื่อ-นามสกุล}<br/><b>📦 ยอดส่งต่อเดือน:</b> {ยอดส่ง/เดือน} ถัง", "style": {"backgroundColor": "#1e293b", "color": "white", "padding": "10px", "borderRadius": "6px"}}
+                st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip, map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"))
+
             render_fast_pydeck_map(df, active_cars_tab1)
 
-        # TAB 2: จัดสายส่งใหม่ด้วยการเลือกพื้นที่ (Area / Bounding Box Selection)
+        # TAB 2: จัดสายส่งใหม่พร้อมแผนที่เส้นกรอบพื้นที่ (Bounding Box Guide Lines)
         with tab2:
-            st.subheader("🖱️ จัดสายส่งใหม่ด้วยการเลือกพื้นที่พิกัด (Area & Bounding Box Selection)")
-            st.info("💡 **คำแนะนำ:** คุณสามารถกำหนดช่วงพิกัดละติจูด (Lat) และลองจิจูด (Lon) ของโซนที่ต้องการสร้างสายส่งใหม่ ระบบจะทำการคำนวณยอดรวม ตรวจสอบเกณฑ์ 90-93% ตัดขอบนอกหรือดึงจุดใกล้เคียงมาเติมให้อัตโนมัติทันที!")
+            st.subheader("🗺️ กำหนดสเกล Lat / Lon พร้อมเส้นกรอบพื้นที่นำทางบนแผนที่")
+            st.info("💡 **คำแนะนำ:** เลื่อนปรับสเกล Lat/Lon ด้านล่าง แผนที่ด้านบนจะแสดง **เส้นกรอบสีส้ม (Bounding Box Boundary)** และ **จุดพิกัดในพื้นที่ (สีแดง)** เพื่อให้คุณเห็นขอบเขตพื้นที่ที่จะสร้างสายส่งใหม่ได้อย่างชัดเจนทันที!")
 
+            # ส่วนควบคุมสเกล Lat / Lon
             col_lat1, col_lat2 = st.columns(2)
             with col_lat1:
                 lat_min_val = float(df['latitude'].min())
                 lat_max_val = float(df['latitude'].max())
-                lat_range = st.slider("🌐 เลือกช่วงละติจูด (Latitude Range):", lat_min_val, lat_max_val, (lat_min_val + 0.05, lat_max_val - 0.05), step=0.001)
+                lat_range = st.slider("🌐 เลือกช่วงละติจูด (Latitude Range):", lat_min_val, lat_max_val, (lat_min_val + 0.05, lat_max_val - 0.05), step=0.001, key="lat_slider")
             with col_lat2:
                 lon_min_val = float(df['longitude'].min())
                 lon_max_val = float(df['longitude'].max())
-                lon_range = st.slider("🌐 เลือกช่วงลองจิจูด (Longitude Range):", lon_min_val, lon_max_val, (lon_min_val + 0.05, lon_max_val - 0.05), step=0.001)
+                lon_range = st.slider("🌐 เลือกช่วงลองจิจูด (Longitude Range):", lon_min_val, lon_max_val, (lon_min_val + 0.05, lon_max_val - 0.05), step=0.001, key="lon_slider")
 
-            # แสดงพิกัดและจำนวนจุดในพื้นที่ที่เลือกแบบเรียลไทม์
+            # แสดงแผนที่นำทางพร้อมเส้นกรอบพื้นที่แบบเรียลไทม์
+            render_bounding_box_pydeck_map(df, all_cars, lat_range[0], lat_range[1], lon_range[0], lon_range[1])
+
+            # แสดงสรุปข้อมูลพิกัดในกรอบ
             preview_subset = df[(df['latitude'] >= lat_range[0]) & (df['latitude'] <= lat_range[1]) & 
                                 (df['longitude'] >= lon_range[0]) & (df['longitude'] <= lon_range[1])]
-            st.markdown(f"📌 **จุดส่งในพื้นที่เลือกปัจจุบัน:** `{len(preview_subset)} จุด` | **ยอดส่งรวม:** `{round(preview_subset['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ'].sum(), 2)} ถัง/สัปดาห์`")
+            st.markdown(f"📌 **จุดส่งในกรอบพื้นที่ปัจจุบัน:** `{len(preview_subset)} จุด` | **ยอดส่งรวม:** `{round(preview_subset['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ'].sum(), 2)} ถัง/สัปดาห์`")
 
-            if st.button("🚀 ประมวลผลสร้างสายส่งใหม่ (NEW-CAR-99) และปรับเข้าเกณฑ์ 90-93%"):
+            if st.button("🚀 ประมวลผลสร้างสายส่งใหม่ (NEW-CAR-99) จากกรอบพื้นที่นี้"):
                 new_df, tot_vol, max_cap, result_msg = process_area_selection_route(df, lat_range[0], lat_range[1], lon_range[0], lon_range[1])
                 st.session_state['df_area_opt'] = new_df
                 st.success(result_msg)
@@ -386,7 +424,7 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
                 selected_cars_opt = st.multiselect("🎨 เลือกเบอร์รถแสดงผล (ผลลัพธ์สายส่งใหม่):", options=all_cars_opt, default=all_cars_opt, key="opt_area_selector")
                 active_cars_opt = selected_cars_opt if selected_cars_opt else all_cars_opt
                 
-                render_fast_pydeck_map(current_area_df, active_cars_opt)
+                render_bounding_box_pydeck_map(current_area_df, active_cars_opt, lat_range[0], lat_range[1], lon_range[0], lon_range[1])
                 
                 filtered_opt = current_area_df[current_area_df['เบอร์รถ'].astype(str).isin(active_cars_opt)]
                 cols_to_show = ['รหัสสมาชิก', 'ชื่อ-นามสกุล', 'เบอร์รถ', 'รอบส่งประจำสัปดาห์', 'ยอดส่ง/เดือน', 'ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ', 'กำลังบรรทุกต่อวัน(ถัง)', 'ที่อยู่จัดส่ง บ้านเลขที่/อาคาร', 'พิกัด Lat/Long']
