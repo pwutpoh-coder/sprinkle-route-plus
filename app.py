@@ -14,7 +14,7 @@ st.set_page_config(
 )
 
 st.title("📍 Sprinkle Route Plus")
-st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Interactive Lasso & Box Drag-Selection Engine)")
+st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Custom New Vehicle Capacity & Lasso Engine)")
 
 # 2. Sidebar สำหรับอัปโหลดไฟล์และตั้งค่า
 st.sidebar.header("⚙️ ตั้งค่าข้อมูล")
@@ -23,6 +23,18 @@ uploaded_cap_file = st.sidebar.file_uploader("2. อัปโหลดไฟล�
 
 target_year = st.sidebar.number_input("ปี ค.ศ.", min_value=2024, max_value=2030, value=2026)
 target_month = st.sidebar.selectbox("เดือน", range(1, 13), format_func=lambda x: calendar.month_name[x], index=7) # Default ส.ค. (8)
+
+# ตั้งค่ากำลังส่ง 100% ต่อวันของรถคันใหม่
+st.sidebar.divider()
+st.sidebar.header("🚚 ตั้งค่ารถคันใหม่ (New Car)")
+new_car_daily_capacity = st.sidebar.number_input(
+    "กำลังส่ง 100% ต่อวันของรถคันใหม่ (ถัง/วัน):",
+    min_value=50.0,
+    max_value=500.0,
+    value=200.0,
+    step=10.0,
+    help="ระบุจำนวนถังสูงสุดที่รถคันใหม่สามารถส่งได้ใน 1 วัน เพื่อใช้คำนวณเป้าหมาย % Utilization (90-93%)"
+)
 
 # Map วันในภาษาไทย (ตัดวันอาทิตย์ออก)
 DAY_MAP = {
@@ -230,7 +242,6 @@ def render_fast_pydeck_map(df_input, selected_cars):
         )
     )
 
-# ฟังก์ชันแสดงกราฟ Scatter แบบลากครอบพิกัดได้ (Lasso / Box Select) สำหรับ Tab 2
 def render_lasso_plotly_map(df_input, selected_cars, key_name):
     df_copy = df_input.copy()
     df_copy['car_str'] = df_copy['เบอร์รถ'].astype(str)
@@ -252,7 +263,7 @@ def render_lasso_plotly_map(df_input, selected_cars, key_name):
         yaxis_title="ละติจูด (Latitude)",
         margin={"r":0,"t":20,"l":0,"b":0},
         clickmode='event+select',
-        dragmode='lasso' # เครื่องมือลากครอบอิสระ
+        dragmode='lasso'
     )
     
     selection = st.plotly_chart(
@@ -280,12 +291,18 @@ def render_limited_dataframe(df_to_show, key_suffix):
         st.dataframe(df_to_show.head(limit), use_container_width=True)
         st.caption(f"⚡ แสดง {limit} รายการแรกเพื่อความรวดเร็ว")
 
-# 5. ฟังก์ชันจัดการพื้นที่ลากครอบ (Lasso/Box Selection Rebalancing) + Auto Rebalance
-def process_lasso_selection_route(df_in, selected_indices, target_min=90.0, target_max=93.0, new_car_capacity=200.0):
+# 5. ฟังก์ชันจัดการพื้นที่ลากครอบโดยใช้ค่ากำลังส่ง 100% ต่อวันที่ผู้ใช้กำหนด
+def process_lasso_selection_route(df_in, selected_indices, custom_daily_cap, target_min=90.0, target_max=93.0):
     df_res = df_in.copy()
-    max_weekly_cap = new_car_capacity * 6.0
+    
+    # กำหนดกำลังส่ง 100% ต่อวัน และ 100% ต่อสัปดาห์ (คูณ 6 วัน) ของรถคันใหม่
+    max_daily_cap = custom_daily_cap
+    max_weekly_cap = max_daily_cap * 6.0
     target_min_vol = max_weekly_cap * (target_min / 100.0) # 90%
     target_max_vol = max_weekly_cap * (target_max / 100.0) # 93%
+
+    # กำหนดค่ากำลังบรรทุกต่อวันให้กับรถคันใหม่ (NEW-CAR-99) ใน DataFrame
+    df_res.loc[df_res['เบอร์รถ'] == 'NEW-CAR-99', 'กำลังบรรทุกต่อวัน(ถัง)'] = max_daily_cap
 
     if not selected_indices:
         return df_res, 0, 0, "⚠️ ไม่พบจุดพิกัดที่ถูกลากครอบ กรุณาใช้เครื่องมือ Lasso หรือ Box ลากเลือกพื้นที่บนกราฟพิกัด"
@@ -313,7 +330,10 @@ def process_lasso_selection_route(df_in, selected_indices, target_min=90.0, targ
                 valid_indices.append(idx)
 
         df_res.loc[valid_indices, 'เบอร์รถ'] = 'NEW-CAR-99'
-        msg = f"⚠️ พื้นที่ลากครอบมียอดส่งเกินเกณฑ์ (>93%) ระบบตัดขอบนอกออกอัตโนมัติ คงเหลือ {round(accumulated_vol, 2)} ถัง/สัปดาห์ ({round((accumulated_vol/max_weekly_cap)*100, 2)}%) เข้าสู่เกณฑ์ปกติ"
+        df_res.loc[valid_indices, 'กำลังบรรทุกต่อวัน(ถัง)'] = max_daily_cap
+        
+        pct_util = round((accumulated_vol / max_weekly_cap) * 100, 2)
+        msg = f"⚠️ พื้นที่ลากครอบมียอดส่งเกินเกณฑ์ (>93%) ระบบตัดขอบนอกออกอัตโนมัติ คงเหลือ {round(accumulated_vol, 2)} ถัง/สัปดาห์ (จากเป้าหมาย 100% สัปดาห์ละ {max_weekly_cap} ถัง คิดเป็น {pct_util}%) เข้าสู่เกณฑ์ปกติ"
         
         for drop_idx in dropped_indices:
             drop_row = df_res.loc[drop_idx]
@@ -325,9 +345,11 @@ def process_lasso_selection_route(df_in, selected_indices, target_min=90.0, targ
 
     # กรณี 2: ยอดต่ำกว่าเกณฑ์ (<90%) -> แจ้งเตือนและดึงจุดส่งรอบข้างมาเติมให้ครบช่วง 90-93%
     elif total_vol < target_min_vol:
-        msg = f"⚠️ ยอดส่งต่ำกว่าเกณฑ์ (<90% โดยมียอด {round(total_vol, 2)} ถัง/สัปดาห์ หรือ {round((total_vol/max_weekly_cap)*100, 2)}%) ระบบกำลังดึงจุดส่งรอบข้างที่ใกล้ที่สุดมาเติมให้ครบช่วง 90-93%..."
+        pct_util_initial = round((total_vol / max_weekly_cap) * 100, 2)
+        msg = f"⚠️ ยอดส่งต่ำกว่าเกณฑ์ (<90% โดยมียอด {round(total_vol, 2)} ถัง/สัปดาห์ คิดเป็น {pct_util_initial}%) ระบบกำลังดึงจุดส่งรอบข้างที่ใกล้ที่สุดมาเติมให้ครบช่วง 90-93%..."
         
         df_res.loc[selected_subset.index, 'เบอร์รถ'] = 'NEW-CAR-99'
+        df_res.loc[selected_subset.index, 'กำลังบรรทุกต่อวัน(ถัง)'] = max_daily_cap
         current_new_vol = total_vol
 
         outside_df = df_res[df_res['เบอร์รถ'] != 'NEW-CAR-99'].copy()
@@ -343,16 +365,20 @@ def process_lasso_selection_route(df_in, selected_indices, target_min=90.0, targ
                     vol = row['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ']
                     if current_new_vol + vol <= target_max_vol:
                         df_res.loc[idx, 'เบอร์รถ'] = 'NEW-CAR-99'
+                        df_res.loc[idx, 'กำลังบรรทุกต่อวัน(ถัง)'] = max_daily_cap
                         current_new_vol += vol
                         added_count += 1
                 else:
                     break
-            msg += f" เติมจุดส่งใกล้เคียงสำเร็จ {added_count} จุด ยอดรวมใหม่เป็น {round(current_new_vol, 2)} ถัง/สัปดาห์ ({round((current_new_vol/max_weekly_cap)*100, 2)}%)"
+            pct_util_final = round((current_new_vol / max_weekly_cap) * 100, 2)
+            msg += f" เติมจุดส่งใกล้เคียงสำเร็จ {added_count} จุด ยอดรวมใหม่เป็น {round(current_new_vol, 2)} ถัง/สัปดาห์ (คิดเป็น {pct_util_final}%)"
     
     # กรณี 3: อยู่ในเกณฑ์พอดี (90-93%)
     else:
         df_res.loc[selected_subset.index, 'เบอร์รถ'] = 'NEW-CAR-99'
-        msg = f"✅ พื้นที่ลากครอบอยู่ในเกณฑ์ปกติเป๊ะ ({round((total_vol/max_weekly_cap)*100, 2)}% หรือ {round(total_vol, 2)} ถัง/สัปดาห์) สร้างสายส่งใหม่สำเร็จ"
+        df_res.loc[selected_subset.index, 'กำลังบรรทุกต่อวัน(ถัง)'] = max_daily_cap
+        pct_util = round((total_vol / max_weekly_cap) * 100, 2)
+        msg = f"✅ พื้นที่ลากครอบอยู่ในเกณฑ์ปกติเป๊ะ (ยอดรวม {round(total_vol, 2)} ถัง/สัปดาห์ จากเป้าหมายสัปดาห์ละ {max_weekly_cap} ถัง คิดเป็น {pct_util}%) สร้างสายส่งใหม่สำเร็จ"
 
     df_res, _, _ = assign_vehicle_colors(df_res)
     return df_res, total_vol, max_weekly_cap, msg
@@ -370,7 +396,7 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
         df, rgb_map, hex_map = process_data(df_main_raw, df_cap_raw, target_year, target_month)
         all_cars = sorted(df['เบอร์รถ'].astype(str).unique())
         
-        tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่ภาพรวม", "⚡ จัดสายส่งใหม่ (ลากครอบพิกัดอิสระ Lasso/Box)", "📥 สรุปและExport ข้อมูล"])
+        tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่ภาพรวม", "⚡ จัดสายส่งใหม่ (ตั้งค่ากำลังส่งคันใหม่ & ลากครอบพิกัด)", "📥 สรุปและExport ข้อมูล"])
         
         # TAB 1: สรุปและแผนที่หลัก
         with tab1:
@@ -390,15 +416,14 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
             active_cars_tab1 = selected_cars_tab1 if selected_cars_tab1 else all_cars
             render_fast_pydeck_map(df, active_cars_tab1)
 
-        # TAB 2: จัดสายส่งใหม่ด้วยการลากครอบพิกัดอิสระ (Lasso / Box Select)
+        # TAB 2: จัดสายส่งใหม่ด้วยการลากครอบพิกัดอิสระ + กำหนดกำลังส่งรถคันใหม่
         with tab2:
             st.subheader("🖱️ จัดสายส่งใหม่ด้วยการลากครอบพิกัดอิสระ (Interactive Lasso & Box Selection)")
-            st.info("💡 **วิธีใช้งาน:** ใช้เครื่องมือ **Lasso Select (ไอคอนบ่วงบาศ)** หรือ **Box Select (ไอคอนสี่เหลี่ยม)** ที่มุมขวาบนของกราฟพิกัดด้านล่าง ลากครอบพื้นที่กลุ่มลูกค้าที่ต้องการสร้างเป็นสายส่งใหม่ ระบบจะประมวลผลยอดรวมและปรับเข้าเกณฑ์ 90-93% ให้อัตโนมัติทันที!")
+            st.info(f"💡 **ข้อมูลรถคันใหม่ปัจจุบัน:** กำหนดกำลังส่ง 100% ต่อวัน = **{new_car_daily_capacity} ถัง/วัน** (ยอด 100% ต่อสัปดาห์ = **{new_car_daily_capacity * 6} ถัง/สัปดาห์** | เป้าหมายเกณฑ์ปกติ 90-93% คือ **{round(new_car_daily_capacity * 6 * 0.9, 2)} ถึง {round(new_car_daily_capacity * 6 * 0.93, 2)} ถัง/สัปดาห์**)")
 
             selected_cars_tab2 = st.multiselect("🎨 เลือกเบอร์รถบนแผนที่เพื่อช่วยในการลากครอบ:", options=all_cars, default=all_cars, key="tab2_car_selector")
             active_cars_tab2 = selected_cars_tab2 if selected_cars_tab2 else all_cars
 
-            # เรียกใช้ Plotly Scatter พร้อมรับข้อมูลการลากครอบ (Selection Event)
             selection_event = render_lasso_plotly_map(df, active_cars_tab2, "map_lasso_tab2")
 
             selected_indices = []
@@ -411,8 +436,8 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
             if selected_indices:
                 st.success(f"🎯 คุณลากครอบเลือกจุดส่งทั้งหมด {len(selected_indices)} จุด")
                 
-                if st.button("🚀 ประมวลผลสร้างสายส่งใหม่ (NEW-CAR-99) จากพื้นที่ที่ลากครอบ"):
-                    new_df, tot_vol, max_cap, result_msg = process_lasso_selection_route(df, selected_indices)
+                if st.button("🚀 ประมวลผลสร้างสายส่งใหม่ (NEW-CAR-99) และตรวจสอบเทียบเกณฑ์ 90-93%"):
+                    new_df, tot_vol, max_cap, result_msg = process_lasso_selection_route(df, selected_indices, new_car_daily_capacity)
                     st.session_state['df_lasso_opt'] = new_df
                     st.toast(result_msg, icon="📌")
                     st.success(result_msg)
