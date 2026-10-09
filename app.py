@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
+import plotly.graph_objects as go
 import calendar
 import io
 
@@ -157,30 +157,33 @@ def calculate_vehicle_utilization(df, year, month):
         })
     return pd.DataFrame(summary_list)
 
-# 4. ฟังก์ชันแสดงแผนที่ Mapbox จริง รองรับซูม เลื่อน และ Lasso / Box Selection
+# 4. ฟังก์ชันแสดงแผนที่ Mapbox (ใช้ go.Scattermapbox เพื่อความเสถียร 100%)
 def render_plotly_map(df_input, selected_cars, key_name):
     df_copy = df_input.copy()
     df_copy['car_str'] = df_copy['เบอร์รถ'].astype(str)
     
     df_filtered = df_copy[df_copy['car_str'].isin(selected_cars)]
     
-    # คำนวณจุดกึ่งกลางแผนที่อัตโนมัติจากข้อมูลพิกัด
     mean_lat = df_filtered['latitude'].mean() if not df_filtered.empty else 13.7563
     mean_lon = df_filtered['longitude'].mean() if not df_filtered.empty else 100.5018
     
-    fig = px.scatter_mapbox(
-        df_filtered,
-        lat="latitude",
-        lon="longitude",
-        color="car_str",
-        color_discrete_map={car: col for car, col in zip(df_copy['car_str'].unique(), df_copy['color_hex'].unique())},
-        hover_name="รหัสสมาชิก",
-        hover_data=["ชื่อ-นามสกุล", "ยอดส่ง/เดือน", "ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ", "เบอร์รถ"],
-        zoom=11,
-        height=600
-    )
+    fig = go.Figure()
     
-    # ใช้ OpenStreetMap tile โดยไม่ต้องใช้ Mapbox Token และรองรับการเลื่อน ซูม ลากคลุม
+    # วาดจุดพิกัดแยกตามเบอร์รถเพื่อให้มีสีสันและ Legend ชัดเจน
+    for car in sorted(df_filtered['car_str'].unique()):
+        sub_df = df_filtered[df_filtered['car_str'] == car]
+        color_val = sub_df['color_hex'].iloc[0] if not sub_df.empty else '#1f77b4'
+        
+        fig.add_trace(go.Scattermapbox(
+            lat=sub_df['latitude'],
+            lon=sub_df['longitude'],
+            mode='markers',
+            marker=dict(size=9, color=color_val),
+            name=str(car),
+            text=sub_df['รหัสสมาชิก'] + " - " + sub_df['ชื่อ-นามสกุล'] + "<br>ยอดส่ง/เดือน: " + sub_df['ยอดส่ง/เดือน'].astype(str) + " ถัง",
+            hoverinfo='text'
+        ))
+    
     fig.update_layout(
         mapbox_style="open-street-map",
         mapbox=dict(
@@ -188,6 +191,7 @@ def render_plotly_map(df_input, selected_cars, key_name):
             zoom=11
         ),
         margin={"r":0,"t":0,"l":0,"b":0},
+        height=600,
         clickmode='event+select',
         dragmode='lasso'
     )
@@ -319,7 +323,7 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
                 st.success("✅ ทุกคันอยู่ในเกณฑ์ปกติหรือต่ำกว่าเกณฑ์")
             
             st.divider()
-            st.subheader("🗺️ แผนที่ภูมิประเทศ (Mapbox OpenStreetMap)")
+            st.subheader("🗺️ แผนที่ภูมิประเทศ OpenStreetMap (ซูม เลื่อน ได้อิสระ)")
             selected_cars_tab1 = st.multiselect("🎨 เลือกเบอร์รถแสดงผล:", options=all_cars, default=all_cars, key="tab1_car_selector")
             active_cars_tab1 = selected_cars_tab1 if selected_cars_tab1 else all_cars
             render_plotly_map(df, active_cars_tab1, "map_tab1")
@@ -335,11 +339,22 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
             selection_event = render_plotly_map(df, active_cars_tab2, "map_tab2")
 
             selected_indices = []
-            if selection_event and "point_indices" in selection_event.get("selection", {}):
-                filtered_df_temp = df[df['เบอร์รถ'].astype(str).isin(active_cars_tab2)].reset_index(drop=True)
-                selected_filtered_indices = selection_event["selection"]["point_indices"]
-                if selected_filtered_indices:
-                    selected_indices = filtered_df_temp.iloc[selected_filtered_indices].index.tolist()
+            if selection_event and "point_index" in selection_event.get("selection", {}).get("points", [{}])[0]:
+                # ดึงจุดพิกัดที่ถูกเลือกจากกราฟหลาย Trace
+                selected_points = selection_event["selection"]["points"]
+                filtered_df_temp = df[df['เบอร์รถ'].astype(str).isin(active_cars_tab2)].copy()
+                
+                # แมพจุดที่ถูกเลือกกลับไปยัง Index ของ DataFrame หลัก
+                for pt in selected_points:
+                    curve_number = pt.get("curveNumber", 0)
+                    point_number = pt.get("pointIndex", 0)
+                    # หาค่าแถวที่ตรงกันใน filtered dataframe
+                    cars_list = sorted(filtered_df_temp['car_str'].unique())
+                    if curve_number < len(cars_list):
+                        car_name = cars_list[curve_number]
+                        sub_indices = filtered_df_temp[filtered_df_temp['car_str'] == car_name].index.tolist()
+                        if point_number < len(sub_indices):
+                            selected_indices.append(sub_indices[point_number])
 
             if selected_indices:
                 st.success(f"🎯 คุณลากคลุมเลือกจุดส่งทั้งหมด {len(selected_indices)} จุด")
