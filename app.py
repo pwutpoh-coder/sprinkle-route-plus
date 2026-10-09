@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 st.title("📍 Sprinkle Route Plus")
-st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Interactive Lasso & Box Selection Engine)")
+st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Interactive Mapbox & Lasso Selection Engine)")
 
 # 2. Sidebar สำหรับอัปโหลดไฟล์และตั้งค่า
 st.sidebar.header("⚙️ ตั้งค่าข้อมูล")
@@ -157,28 +157,37 @@ def calculate_vehicle_utilization(df, year, month):
         })
     return pd.DataFrame(summary_list)
 
-# 4. ฟังก์ชันแสดงแผนที่ Plotly รองรับ Lasso / Box Selection (ใช้ px.scatter ใช้งานได้ทุกเครื่อง 100%)
+# 4. ฟังก์ชันแสดงแผนที่ Mapbox จริง รองรับซูม เลื่อน และ Lasso / Box Selection
 def render_plotly_map(df_input, selected_cars, key_name):
     df_copy = df_input.copy()
     df_copy['car_str'] = df_copy['เบอร์รถ'].astype(str)
     
     df_filtered = df_copy[df_copy['car_str'].isin(selected_cars)]
     
-    fig = px.scatter(
+    # คำนวณจุดกึ่งกลางแผนที่อัตโนมัติจากข้อมูลพิกัด
+    mean_lat = df_filtered['latitude'].mean() if not df_filtered.empty else 13.7563
+    mean_lon = df_filtered['longitude'].mean() if not df_filtered.empty else 100.5018
+    
+    fig = px.scatter_mapbox(
         df_filtered,
-        x="longitude",
-        y="latitude",
+        lat="latitude",
+        lon="longitude",
         color="car_str",
         color_discrete_map={car: col for car, col in zip(df_copy['car_str'].unique(), df_copy['color_hex'].unique())},
         hover_name="รหัสสมาชิก",
         hover_data=["ชื่อ-นามสกุล", "ยอดส่ง/เดือน", "ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ", "เบอร์รถ"],
+        zoom=11,
         height=600
     )
     
+    # ใช้ OpenStreetMap tile โดยไม่ต้องใช้ Mapbox Token และรองรับการเลื่อน ซูม ลากคลุม
     fig.update_layout(
-        xaxis_title="ลองจิจูด (Longitude)",
-        yaxis_title="ละติจูด (Latitude)",
-        margin={"r":0,"t":20,"l":0,"b":0},
+        mapbox_style="open-street-map",
+        mapbox=dict(
+            center=dict(lat=mean_lat, lon=mean_lon),
+            zoom=11
+        ),
+        margin={"r":0,"t":0,"l":0,"b":0},
         clickmode='event+select',
         dragmode='lasso'
     )
@@ -310,15 +319,15 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
                 st.success("✅ ทุกคันอยู่ในเกณฑ์ปกติหรือต่ำกว่าเกณฑ์")
             
             st.divider()
-            st.subheader("🗺️ แผนที่แสดงพิกัดส่งน้ำดื่มภาพรวม")
+            st.subheader("🗺️ แผนที่ภูมิประเทศ (Mapbox OpenStreetMap)")
             selected_cars_tab1 = st.multiselect("🎨 เลือกเบอร์รถแสดงผล:", options=all_cars, default=all_cars, key="tab1_car_selector")
             active_cars_tab1 = selected_cars_tab1 if selected_cars_tab1 else all_cars
             render_plotly_map(df, active_cars_tab1, "map_tab1")
 
         # TAB 2: จัดสายส่งใหม่ด้วยการลากคลุมพื้นที่ (Lasso / Box Select)
         with tab2:
-            st.subheader("🖱️ จัดสายส่งใหม่ด้วยการลากคลุมพื้นที่บนแผนที่ (Interactive Lasso / Box Select)")
-            st.info("💡 **วิธีใช้งาน:** ใช้เครื่องมือ **Lasso Select (ไอคอนบ่วงบาศ)** หรือ **Box Select (ไอคอนสี่เหลี่ยม)** ที่มุมขวาบนของกราฟด้านล่าง ลากคลุมพื้นที่ลูกค้าที่คุณต้องการสร้างเป็นสายส่งใหม่ ระบบจะทำการคำนวณและปรับสัดส่วนให้อยู่ในเกณฑ์ 90-93% อัตโนมัติ")
+            st.subheader("🖱️ จัดสายส่งใหม่ด้วยการลากคลุมพื้นที่บนแผนที่จริง (Interactive Lasso / Box Select)")
+            st.info("💡 **วิธีใช้งาน:** ใช้เครื่องมือ **Lasso Select (ไอคอนบ่วงบาศ)** หรือ **Box Select (ไอคอนสี่เหลี่ยม)** ที่มุมขวาบนของแผนที่ด้านล่าง ลากคลุมพื้นที่ลูกค้าที่คุณต้องการสร้างเป็นสายส่งใหม่ ระบบจะทำการคำนวณและปรับสัดส่วนให้อยู่ในเกณฑ์ 90-93% อัตโนมัติ")
 
             selected_cars_tab2 = st.multiselect("🎨 เลือกเบอร์รถบนแผนที่เพื่อช่วยในการลากคลุม:", options=all_cars, default=all_cars, key="tab2_car_selector")
             active_cars_tab2 = selected_cars_tab2 if selected_cars_tab2 else all_cars
