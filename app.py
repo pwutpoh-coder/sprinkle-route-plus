@@ -80,7 +80,6 @@ def calculate_row_weekly_volume(row, day_counts):
     total_working_days = day_counts.get('TOTAL_WORKING_DAYS', 26)
     
     if not raw_schedule or raw_schedule.lower() == 'nan':
-        # ถ้าไม่มีรอบส่งระบุ ให้เฉลี่ยจากสัดส่วนวันทำงาน
         weekly_vol = (monthly_vol / total_working_days) * 6.0
         return round(weekly_vol, 2)
 
@@ -99,14 +98,11 @@ def calculate_row_weekly_volume(row, day_counts):
         weekly_vol = (monthly_vol / total_working_days) * 6.0
         return round(weekly_vol, 2)
 
-    # หาค่าเฉลี่ยจำนวนครั้งของวันในเดือนของรอบส่งนั้นๆ (เช่น ถ้ามี จันทร์, อังคาร นำจำนวนครั้งมารวมกันหาร 2)
     avg_days_in_month = sum(day_counts.get(day, 4) for day in found_days) / len(found_days)
     if avg_days_in_month <= 0:
         avg_days_in_month = 4.0
 
-    # ยอดส่งต่อสัปดาห์ = ยอดส่งต่อเดือน หารด้วยค่าเฉลี่ยจำนวนวันในเดือนของรอบส่งนั้น
     weekly_vol = monthly_vol / avg_days_in_month
-    
     return round(weekly_vol, 2)
 
 @st.cache_data
@@ -114,7 +110,6 @@ def process_data(df_main, df_cap, year, month):
     df = df_main.copy()
     df['ยอดส่ง/เดือน'] = pd.to_numeric(df.get('ยอดส่ง/เดือน', 0), errors='coerce').fillna(0)
     
-    # รวมข้อมูลกำลังบรรทุก 100% จากไฟล์ที่ 2 (กำลังส่ง.xlsx)
     if df_cap is not None:
         if 'กำลังส่ง' in df_cap.columns and 'เบอร์รถ' in df_cap.columns:
             df_cap['เบอร์รถ_str'] = df_cap['เบอร์รถ'].astype(str)
@@ -145,18 +140,12 @@ def calculate_vehicle_utilization(df, year, month):
     
     for car, group in df.groupby('เบอร์รถ'):
         total_monthly_vol = group['ยอดส่ง/เดือน'].sum()
-        # ผลรวมยอดส่งต่อสัปดาห์ของลูกค้าแต่ละเบอร์รถ
         total_calculated_weekly_vol = group['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ'].sum() 
-        
         max_daily_cap = group['กำลังบรรทุกต่อวัน(ถัง)'].iloc[0] if 'กำลังบรรทุกต่อวัน(ถัง)' in group.columns else 200
-        
-        # ยอดส่ง 100% ต่อสัปดาห์ = ยอดส่ง 100% ต่อวัน * 6 วัน
         max_weekly_cap = max_daily_cap * 6.0
 
-        # % Utilization = (ผลรวมยอดส่งต่อสัปดาห์ / ยอดส่ง 100% ต่อสัปดาห์) * 100
         utilization_pct = (total_calculated_weekly_vol / max_weekly_cap) * 100 if max_weekly_cap > 0 else 0
         
-        # เกณฑ์ใหม่ตามที่กำหนด: < 90% (ต่ำกว่าเกณฑ์), 90-93% (เกณฑ์ปกติ), > 93% (เกินเกณฑ์)
         if utilization_pct > 93:
             status = '🔴 เกินเกณฑ์ (>93%)'
         elif 90 <= utilization_pct <= 93:
@@ -254,8 +243,8 @@ def render_limited_dataframe(df_to_show, key_suffix):
         st.dataframe(df_to_show.head(limit), use_container_width=True)
         st.caption(f"⚡ แสดง {limit} รายการแรกเพื่อความรวดเร็ว (ดาวน์โหลดทั้งหมดได้ที่ Tab 3)")
 
-# 5. อัลกอริทึมตัดสายส่งใหม่โดยคุมเป้าหมาย % Utilization ให้อยู่ในช่วง 90% - 93%
-def rebalance_routes_strict_utilization(df_in, target_cars, fix_stay_ids, fix_move_ids, target_min_pct=90.0, target_max_pct=93.0, new_car_capacity=200.0):
+# 5. อัลกอริทึมตัดสายส่งใหม่รองรับการเลือกพื้นที่อ้างอิง (เบอร์รถต้นแบบ หรือ สมาชิกต้นแบบ)
+def rebalance_routes_strict_utilization(df_in, target_cars, fix_stay_ids, fix_move_ids, reference_type, reference_value, target_min_pct=90.0, target_max_pct=93.0, new_car_capacity=200.0):
     df_res = df_in.copy()
     
     if fix_move_ids:
@@ -263,6 +252,17 @@ def rebalance_routes_strict_utilization(df_in, target_cars, fix_stay_ids, fix_mo
 
     new_car_target_min = new_car_capacity * 6.0 * (target_min_pct / 100.0)
     new_car_target_max = new_car_capacity * 6.0 * (target_max_pct / 100.0)
+
+    # คำนวณจุดศูนย์กลางอ้างอิง (Reference Center) สำหรับสายส่งใหม่
+    ref_center = None
+    if reference_type == "อ้างอิงตามพื้นที่เบอร์รถเดิม" and reference_value:
+        ref_rows = df_res[df_res['เบอร์รถ'].astype(str) == str(reference_value)]
+        if not ref_rows.empty:
+            ref_center = ref_rows[['latitude', 'longitude']].values.mean(axis=0)
+    elif reference_type == "อ้างอิงตามพิกัดรหัสสมาชิกรายใดรายหนึ่ง" and reference_value:
+        ref_rows = df_res[df_res['รหัสสมาชิก'].astype(str) == str(reference_value)]
+        if not ref_rows.empty:
+            ref_center = ref_rows[['latitude', 'longitude']].values[0]
 
     for car in target_cars:
         car_rows = df_res[df_res['เบอร์รถ'].astype(str) == str(car)]
@@ -281,11 +281,18 @@ def rebalance_routes_strict_utilization(df_in, target_cars, fix_stay_ids, fix_mo
             if eligible_candidates.empty:
                 continue
 
-            if len(eligible_candidates) >= 2:
+            # จัดเรียงลำดับจุดส่งที่จะดึงออก: หากมีจุดศูนย์กลางอ้างอิง ให้เลือกจุดที่ใกล้ (หรือไกล) กับจุดอ้างอิงตามความเหมาะสม
+            if ref_center is not None:
                 coords = eligible_candidates[['latitude', 'longitude']].values
-                center = coords.mean(axis=0)
-                eligible_candidates['dist_to_center'] = np.linalg.norm(coords - center, axis=1)
-                eligible_candidates = eligible_candidates.sort_values(by='dist_to_center', ascending=False)
+                # คำนวณระยะห่างจากจุดอ้างอิง เพื่อดึงจุดที่อยู่ใกล้โซนใหม่มาจัดเข้าสายส่งใหม่ก่อน
+                eligible_candidates['dist_to_ref'] = np.linalg.norm(coords - ref_center, axis=1)
+                eligible_candidates = eligible_candidates.sort_values(by='dist_to_ref', ascending=True)
+            else:
+                if len(eligible_candidates) >= 2:
+                    coords = eligible_candidates[['latitude', 'longitude']].values
+                    center = coords.mean(axis=0)
+                    eligible_candidates['dist_to_center'] = np.linalg.norm(coords - center, axis=1)
+                    eligible_candidates = eligible_candidates.sort_values(by='dist_to_center', ascending=False)
 
             for idx, candidate in eligible_candidates.iterrows():
                 new_car_current_vol = df_res[df_res['เบอร์รถ'] == 'NEW-CAR-11']['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ'].sum()
@@ -327,7 +334,6 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
             veh_summary = calculate_vehicle_utilization(df, target_year, target_month)
             st.dataframe(veh_summary, use_container_width=True)
             
-            # Highlight เบอร์รถที่เกินเกณฑ์ (>93%) เพื่อพิจารณาทำสายส่งใหม่
             over_limit_cars = veh_summary[veh_summary['% การใช้งานกำลังบรรทุก (% Utilization)'] > 93]['เบอร์รถ'].tolist()
             if over_limit_cars:
                 st.warning(f"🚨 รถที่มียอดส่งเกินเกณฑ์ (>93%) ที่ต้องพิจารณาจัดสายส่งใหม่ ได้แก่: {', '.join(map(str, over_limit_cars))}")
@@ -353,29 +359,45 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
             existing_cols = [c for c in cols_to_show if c in filtered_df_tab1.columns]
             render_limited_dataframe(filtered_df_tab1[existing_cols], "tab1")
 
-        # TAB 2: จัดสายส่งใหม่
+        # TAB 2: จัดสายส่งใหม่ (พร้อมตัวเลือกกำหนดพื้นที่ใกล้เคียง)
         with tab2:
             st.subheader("⚙️ เงื่อนไขการจัดสายส่งใหม่ (ควบคุม % Utilization ให้อยู่ในช่วง 90% - 93%)")
+            
+            # เพิ่มฟีเจอร์เลือกพื้นที่ใกล้เคียงสำหรับสายส่งใหม่
+            st.markdown("📍 **กำหนดจุดศูนย์กลาง / พื้นที่เป้าหมายของสายส่งใหม่ (รถคันใหม่)**")
+            ref_col1, ref_col2 = st.columns(2)
+            with ref_col1:
+                ref_type = st.radio(
+                    "เลือกรูปแบบการอ้างอิงพื้นที่สำหรับสายส่งใหม่:",
+                    options=["อ้างอิงตามพื้นที่เบอร์รถเดิม", "อ้างอิงตามพิกัดรหัสสมาชิกรายใดรายหนึ่ง"]
+                )
+            with ref_col2:
+                if ref_type == "อ้างอิงตามพื้นที่เบอร์รถเดิม":
+                    ref_val = st.selectbox("เลือกเบอร์รถต้นแบบที่ต้องการให้สายส่งใหม่อยู่ใกล้พื้นที่:", options=all_cars)
+                else:
+                    ref_val = st.selectbox("เลือกรหัสสมาชิก / ลูกค้าต้นแบบ:", options=df['รหัสสมาชิก'].unique())
+
+            st.divider()
             col_a, col_b = st.columns(2)
             with col_a:
-                selected_source_cars = st.multiselect("🚚 เลือกเฉพาะเบอร์รถที่จะนำมาจัดสายส่งใหม่:", options=all_cars, default=over_limit_cars if over_limit_cars else all_cars)
+                selected_source_cars = st.multiselect("🚚 เลือกเฉพาะเบอร์รถที่จะนำมาจัดสายส่งใหม่:", options=all_cars, default=over_limit_cars if over_limit_cars else all_cars, key="source_cars_tab2")
             with col_b:
-                fix_no = st.multiselect("🔒 รหัสสมาชิกที่ไม่ยอมให้ย้าย (Fix Stay)", df['รหัสสมาชิก'].unique())
+                fix_no = st.multiselect("🔒 รหัสสมาชิกที่ไม่ยอมให้ย้าย (Fix Stay)", df['รหัสสมาชิก'].unique(), key="fix_stay_tab2")
                 
             col_c, col_d = st.columns(2)
             with col_c:
-                fix_move = st.multiselect("🚚 รหัสสมาชิกที่บังคับย้ายไปรถคันใหม่", df['รหัสสมาชิก'].unique())
+                fix_move = st.multiselect("🚚 รหัสสมาชิกที่บังคับย้ายไปรถคันใหม่", df['รหัสสมาชิก'].unique(), key="fix_move_tab2")
             with col_d:
-                target_pct_range = st.slider("ช่วงเป้าหมาย % กำลังบรรทุกของรถคันใหม่และคันที่ถูกตัด", 85.0, 98.0, (90.0, 93.0), step=0.5)
+                target_pct_range = st.slider("ช่วงเป้าหมาย % กำลังบรรทุกของรถคันใหม่และคันที่ถูกตัด", 85.0, 98.0, (90.0, 93.0), step=0.5, key="slider_tab2")
 
-            if st.button("🚀 ประมวลผลสร้าง 3 ทางเลือกแบบเกาะกลุ่มพื้นที่ (เป้าหมาย 90-93%)"):
+            if st.button("🚀 ประมวลผลสร้าง 3 ทางเลือกตามพื้นที่อ้างอิง (เป้าหมาย 90-93%)"):
                 source_cars = selected_source_cars if selected_source_cars else all_cars
                 min_p, max_p = target_pct_range
                 
-                st.session_state['df_opt1'] = rebalance_routes_strict_utilization(df, source_cars, fix_no, fix_move, target_min_pct=min_p, target_max_pct=max_p)
-                st.session_state['df_opt2'] = rebalance_routes_strict_utilization(df, source_cars, fix_no, fix_move, target_min_pct=min_p-1.0, target_max_pct=max_p)
-                st.session_state['df_opt3'] = rebalance_routes_strict_utilization(df, source_cars, fix_no, fix_move, target_min_pct=min_p, target_max_pct=max_p+1.0)
-                st.success("คำนวณและปรับสัดส่วนกำลังบรรทุกให้อยู่ในเกณฑ์สำเร็จ!")
+                st.session_state['df_opt1'] = rebalance_routes_strict_utilization(df, source_cars, fix_no, fix_move, ref_type, ref_val, target_min_pct=min_p, target_max_pct=max_p)
+                st.session_state['df_opt2'] = rebalance_routes_strict_utilization(df, source_cars, fix_no, fix_move, ref_type, ref_val, target_min_pct=min_p-1.0, target_max_pct=max_p)
+                st.session_state['df_opt3'] = rebalance_routes_strict_utilization(df, source_cars, fix_no, fix_move, ref_type, ref_val, target_min_pct=min_p, target_max_pct=max_p+1.0)
+                st.success("คำนวณและปรับสัดส่วนกำลังบรรทุกตามพื้นที่อ้างอิงสำเร็จ!")
 
             if 'df_opt1' in st.session_state:
                 opt_tab1, opt_tab2, opt_tab3 = st.tabs(["ทางเลือกที่ 1 (เกณฑ์เป๊ะ 90-93%)", "ทางเลือกที่ 2 (เน้นตัดออกกระจาย)", "ทางเลือกที่ 3 (เน้นรถคันใหม่เต็มกำลัง)"])
