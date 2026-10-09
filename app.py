@@ -264,7 +264,7 @@ def render_mouse_box_plotly_map(df_input, selected_cars, key_name):
         yaxis_title="ละติจูด (Latitude)",
         margin={"r":0,"t":20,"l":0,"b":0},
         clickmode='event+select',
-        dragmode='box' # เริ่มต้นด้วยโหมดลากกรอบสี่เหลี่ยมด้วยเมาส์ (Box Select)
+        dragmode='select' # แก้ไขเป็น 'select' สำหรับการลากกรอบสี่เหลี่ยม
     )
     
     selection = st.plotly_chart(
