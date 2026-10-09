@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 st.title("📍 Sprinkle Route Plus")
-st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Interactive Lat/Long Bounding Box & Auto-Rebalance Engine)")
+st.caption("ระบบบริหารจัดการและจัดสายส่งน้ำดื่มอัจฉริยะ (Interactive Lat/Long Bounding Box Slider with Guide & Auto-Rebalance)")
 
 # 2. Sidebar สำหรับอัปโหลดไฟล์และตั้งค่า
 st.sidebar.header("⚙️ ตั้งค่าข้อมูล")
@@ -169,7 +169,7 @@ def calculate_vehicle_utilization(df, year, month):
         })
     return pd.DataFrame(summary_list)
 
-# 4. ฟังก์ชันแสดงแผนที่ Pydeck พร้อมเส้นกรอบพื้นที่และไฮไลต์สีตามสถานะรถ
+# 4. ฟังก์ชันแสดงแผนที่ Pydeck พร้อมแสดงกรอบพิกัดและเส้นอ้างอิงแนวตั้ง/แนวนอน
 def render_dynamic_axis_pydeck_map(df_input, selected_cars, lat_min, lat_max, lon_min, lon_max):
     df_copy = df_input.copy()
     if 'color_rgb' not in df_copy.columns:
@@ -180,7 +180,7 @@ def render_dynamic_axis_pydeck_map(df_input, selected_cars, lat_min, lat_max, lo
         if car_str == 'NEW-CAR-99':
             return [255, 0, 0, 255] # สีแดงเข้มสำหรับรถใหม่
         elif lat_min <= row['latitude'] <= lat_max and lon_min <= row['longitude'] <= lon_max:
-            return [255, 140, 0, 220] # สีส้มสำหรับจุดในกรอบเลือก
+            return [255, 140, 0, 240] # สีส้มสำหรับจุดในกรอบเลือก
         elif car_str in selected_cars:
             return row['color_rgb']
         return [200, 200, 200, 40]
@@ -231,7 +231,7 @@ def render_dynamic_axis_pydeck_map(df_input, selected_cars, lat_min, lat_max, lo
         "PathLayer",
         data=path_data,
         get_path="path",
-        get_color=[255, 69, 0, 220],
+        get_color=[255, 69, 0, 230],
         width_scale=15,
         width_min_pixels=2,
         pickable=False
@@ -241,6 +241,7 @@ def render_dynamic_axis_pydeck_map(df_input, selected_cars, lat_min, lat_max, lo
         "html": "<b>🚚 เบอร์รถ:</b> {car_str}<br/>"
                 "<b>🆔 รหัสสมาชิก:</b> {รหัสสมาชิก}<br/>"
                 "<b>👤 ชื่อ:</b> {ชื่อ-นามสกุล}<br/>"
+                "<b>📍 Lat/Long:</b> {latitude}, {longitude}<br/>"
                 "<b>📦 ยอดส่งต่อเดือน:</b> {ยอดส่ง/เดือน} ถัง<br/>"
                 "<b>⚡ ยอดส่งเฉลี่ย/สัปดาห์:</b> {ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ} ถัง/สัปดาห์",
         "style": {
@@ -381,7 +382,7 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
         df, rgb_map = process_data(df_main_raw, df_cap_raw, target_year, target_month)
         all_cars = sorted(df['เบอร์รถ'].astype(str).unique())
         
-        tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่ภาพรวม", "⚡ จัดสายส่งใหม่ (สเกล Lat/Long พร้อมวิเคราะห์เชิงลึก)", "📥 สรุปและExport ข้อมูล"])
+        tab1, tab2, tab3 = st.tabs(["📊 สรุปกำลังส่งรายรถ & แผนที่ภาพรวม", "⚡ จัดสายส่งใหม่ (สเกล Lat/Long พร้อมพิกัดนำทาง)", "📥 สรุปและExport ข้อมูล"])
         
         # TAB 1: สรุปและแผนที่หลัก
         with tab1:
@@ -415,35 +416,49 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
 
             render_fast_pydeck_map(df, active_cars_tab1)
 
-        # TAB 2: จัดสายส่งใหม่พร้อมวิเคราะห์เชิงลึกและ Auto-Rebalance
+        # TAB 2: จัดสายส่งใหม่พร้อมระบุขอบเขตสเกลและไกด์ไลน์พิกัด
         with tab2:
-            st.subheader("🗺️ กำหนดกรอบพื้นที่ (Lat/Long) และวิเคราะห์สัดส่วนอัตโนมัติ")
-            st.info(f"💡 **เป้าหมายรถคันใหม่:** กำหนดกำลังส่ง 100% ต่อวัน = **{new_car_daily_capacity} ถัง/วัน** (เป้าหมายเกณฑ์ปกติ 90-93% คือ **{round(new_car_daily_capacity * 6 * 0.9, 2)} ถึง {round(new_car_daily_capacity * 6 * 0.93, 2)} ถัง/สัปดาห์**)")
+            st.subheader("🗺️ กำหนดกรอบสเกล Lat / Lon พร้อมพิกัดไกด์ไลน์แนวตั้งและแนวนอน")
+            
+            # คำนวณค่าขอบเขต Min / Max ของข้อมูลทั้งหมดในไฟล์เพื่อแสดงเป็นไกด์ไลน์
+            lat_min_data = float(df['latitude'].min())
+            lat_max_data = float(df['latitude'].max())
+            lon_min_data = float(df['longitude'].min())
+            lon_max_data = float(df['longitude'].max())
 
-            lat_min_val = float(df['latitude'].min())
-            lat_max_val = float(df['latitude'].max())
-            lon_min_val = float(df['longitude'].min())
-            lon_max_val = float(df['longitude'].max())
+            st.info(f"💡 **คู่มือไกด์ไลน์ขอบเขตข้อมูลทั้งหมดในไฟล์:**\n"
+                    f"- **แกนแนวตั้ง (Latitude):** ต่ำสุด = `{lat_min_data:.4f}` | สูงสุด = `{lat_max_data:.4f}`\n"
+                    f"- **แกนแนวนอน (Longitude):** ต่ำสุด = `{lon_min_data:.4f}` | สูงสุด = `{lon_max_data:.4f}`\n"
+                    f"- **เป้าหมายรถคันใหม่:** กำหนดกำลังส่ง 100% ต่อวัน = **{new_car_daily_capacity} ถัง/วัน** (เป้าหมาย 90-93% คือ **{round(new_car_daily_capacity * 6 * 0.9, 2)} ถึง {round(new_car_daily_capacity * 6 * 0.93, 2)} ถัง/สัปดาห์**)")
 
             if 'lat_range_val' not in st.session_state:
-                st.session_state['lat_range_val'] = (lat_min_val + 0.05, lat_max_val - 0.05)
+                st.session_state['lat_range_val'] = (lat_min_data + 0.03, lat_max_data - 0.03)
             if 'lon_range_val' not in st.session_state:
-                st.session_state['lon_range_val'] = (lon_min_val + 0.05, lon_max_val - 0.05)
+                st.session_state['lon_range_val'] = (lon_min_data + 0.03, lon_max_data - 0.03)
 
             col_btn1, col_btn2 = st.columns([4, 1])
             with col_btn2:
                 if st.button("🔄 รีเซ็ตกรอบพื้นที่"):
-                    st.session_state['lat_range_val'] = (lat_min_val + 0.05, lat_max_val - 0.05)
-                    st.session_state['lon_range_val'] = (lon_min_val + 0.05, lon_max_val - 0.05)
+                    st.session_state['lat_range_val'] = (lat_min_data + 0.03, lat_max_data - 0.03)
+                    st.session_state['lon_range_val'] = (lon_min_data + 0.03, lon_max_data - 0.03)
                     st.rerun()
 
+            # สไลเดอร์พร้อมระบุขอบเขต Min / Max ชัดเจน
             col_lat1, col_lat2 = st.columns(2)
             with col_lat1:
-                lat_range = st.slider("🌐 เลือกช่วงละติจูด (Latitude Range):", lat_min_val, lat_max_val, st.session_state['lat_range_val'], step=0.001, key="lat_slider")
+                lat_range = st.slider(
+                    f"🌐 เลือกช่วงละติจูด (Latitude: {lat_min_data:.4f} ถึง {lat_max_data:.4f}):", 
+                    lat_min_data, lat_max_data, st.session_state['lat_range_val'], step=0.001, key="lat_slider"
+                )
                 st.session_state['lat_range_val'] = lat_range
+                st.caption(f"📌 กรอบ Lat ปัจจุบัน: จาก **{lat_range[0]:.4f}** ถึง **{lat_range[1]:.4f}**")
             with col_lat2:
-                lon_range = st.slider("🌐 เลือกช่วงลองจิจูด (Longitude Range):", lon_min_val, lon_max_val, st.session_state['lon_range_val'], step=0.001, key="lon_slider")
+                lon_range = st.slider(
+                    f"🌐 เลือกช่วงลองจิจูด (Longitude: {lon_min_data:.4f} ถึง {lon_max_data:.4f}):", 
+                    lon_min_data, lon_max_data, st.session_state['lon_range_val'], step=0.001, key="lon_slider"
+                )
                 st.session_state['lon_range_val'] = lon_range
+                st.caption(f"📌 กรอบ Lon ปัจจุบัน: จาก **{lon_range[0]:.4f}** ถึง **{lon_range[1]:.4f}**")
 
             # 1. วิเคราะห์จุดพิกัดในกรอบที่เลือก (แสดงว่าเป็นของรถเดิมคันใดบ้าง)
             preview_subset = df[(df['latitude'] >= lat_range[0]) & (df['latitude'] <= lat_range[1]) & 
@@ -454,7 +469,7 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
             preview_util_pct = (preview_total_vol / max_weekly_target) * 100 if max_weekly_target > 0 else 0.0
 
             st.markdown("---")
-            st.markdown("### 📊 รายงานวิเคราะห์พื้นที่ในกรอบก่อนสร้างสายส่ง")
+            st.markdown("### 📊 รายงานวิเคราะห์พื้นที่ในกรอบ (สีส้ม) ก่อนสร้างสายส่ง")
             
             col_p1, col_p2, col_p3 = st.columns(3)
             col_p1.metric("📍 จำนวนจุดส่งในกรอบ", f"{len(preview_subset):,} จุด")
@@ -477,11 +492,11 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
                 st.markdown("🚚 **พิกัดในกรอบนี้เดิมเป็นของรถคันอ้างอิง:**")
                 st.dataframe(car_breakdown, use_container_width=True)
             else:
-                st.warning("⚠️ ไม่มีจุดลูกค้าในกรอบพื้นที่นี้ กรุณาขยายกรอบสเกลเพิ่มเติม")
+                st.warning("⚠️ ไม่มีจุดลูกค้าในกรอบพื้นที่นี้ กรุณาขยายช่วงสเกล Lat/Lon ให้กว้างขึ้น")
 
             st.markdown("---")
 
-            # แสดงแผนที่นำทางพร้อมเส้นกรอบ
+            # แสดงแผนที่นำทางพร้อมเส้นกรอบสีส้มและแกนพิกัด
             render_dynamic_axis_pydeck_map(df, all_cars, lat_range[0], lat_range[1], lon_range[0], lon_range[1])
 
             if st.button("🚀 ประมวลผลสร้างสายส่งใหม่ (NEW-CAR-99) และปรับสมดุลอัตโนมัติ (Auto Rebalance)"):
@@ -494,14 +509,12 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
                 st.subheader("📋 สรุปแผนที่และผลลัพธ์สายส่งใหม่ (หลังระบบปรับสมดุลเข้าเกณฑ์ 90-93%)")
                 current_area_df = st.session_state['df_area_opt']
                 
-                # แสดงสรุป % Utilization ของทุกคันรวมรถใหม่
                 st.dataframe(calculate_vehicle_utilization(current_area_df, target_year, target_month), use_container_width=True)
                 
                 all_cars_opt = sorted(current_area_df['เบอร์รถ'].astype(str).unique())
                 selected_cars_opt = st.multiselect("🎨 เลือกเบอร์รถแสดงผลบนแผนที่ภาพรวมใหม่:", options=all_cars_opt, default=all_cars_opt, key="opt_area_selector")
                 active_cars_opt = selected_cars_opt if selected_cars_opt else all_cars_opt
                 
-                # แสดงแผนที่ภาพรวมใหม่หลังปรับแต่ง (รถใหม่สีแดงเด่นชัด)
                 render_dynamic_axis_pydeck_map(current_area_df, active_cars_opt, lat_range[0], lat_range[1], lon_range[0], lon_range[1])
                 
                 filtered_opt = current_area_df[current_area_df['เบอร์รถ'].astype(str).isin(active_cars_opt)]
