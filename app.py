@@ -151,37 +151,36 @@ def calculate_vehicle_utilization(df, year, month):
             'ยอดรวมส่งทั้งเดือน (ถัง)': total_monthly_vol,
             'ยอดส่งเฉลี่ยต่อสัปดาห์รวม (ถัง)': round(total_calculated_weekly_vol, 2),
             'กำลังบรรทุก 100% ต่อวัน (ถัง)': max_daily_cap,
-            'กำลังบรรทุก 100%ต่อสัปดาห์ (ถัง)': max_weekly_cap,
+            'กำลังบรรทุก 100% ต่อสัปดาห์ (ถัง)': max_weekly_cap,
             '% การใช้งานกำลังบรรทุก (% Utilization)': round(utilization_pct, 2),
             'สถานะ': status
         })
     return pd.DataFrame(summary_list)
 
-# 4. ฟังก์ชันแสดงแผนที่ Plotly รองรับ Lasso / Box Selection
+# 4. ฟังก์ชันแสดงแผนที่ Plotly รองรับ Lasso / Box Selection (ใช้ px.scatter ใช้งานได้ทุกเครื่อง 100%)
 def render_plotly_map(df_input, selected_cars, key_name):
     df_copy = df_input.copy()
     df_copy['car_str'] = df_copy['เบอร์รถ'].astype(str)
     
-    # กรองเฉพาะรถที่เลือกแสดง
     df_filtered = df_copy[df_copy['car_str'].isin(selected_cars)]
     
-    fig = px.scatter_mapbox(
+    fig = px.scatter(
         df_filtered,
-        lat="latitude",
-        lon="longitude",
+        x="longitude",
+        y="latitude",
         color="car_str",
         color_discrete_map={car: col for car, col in zip(df_copy['car_str'].unique(), df_copy['color_hex'].unique())},
         hover_name="รหัสสมาชิก",
         hover_data=["ชื่อ-นามสกุล", "ยอดส่ง/เดือน", "ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ", "เบอร์รถ"],
-        zoom=11,
         height=600
     )
     
     fig.update_layout(
-        mapbox_style="carto-positron",
-        margin={"r":0,"t":0,"l":0,"b":0},
+        xaxis_title="ลองจิจูด (Longitude)",
+        yaxis_title="ละติจูด (Latitude)",
+        margin={"r":0,"t":20,"l":0,"b":0},
         clickmode='event+select',
-        dragmode='lasso' # เริ่มต้นด้วยโหมดลากคลุมอิสระ (Lasso)
+        dragmode='lasso'
     )
     
     selection = st.plotly_chart(
@@ -209,28 +208,25 @@ def render_limited_dataframe(df_to_show, key_suffix):
         st.dataframe(df_to_show.head(limit), use_container_width=True)
         st.caption(f"⚡ แสดง {limit} รายการแรกเพื่อความรวดเร็ว")
 
-# 5. อัลกอริทึมจัดการพื้นที่ลากคลุม (Lasso Selection Rebalancing) ให้ได้เกณฑ์ 90-93% และเกลี่ยส่วนที่เหลือ
+# 5. อัลกอริทึมจัดการพื้นที่ลากคลุม (Lasso Selection Rebalancing)
 def process_lasso_selection_route(df_in, selected_indices, target_min=90.0, target_max=93.0, new_car_capacity=200.0):
     df_res = df_in.copy()
     max_weekly_cap = new_car_capacity * 6.0
-    target_min_vol = max_weekly_cap * (target_min / 100.0) # 90%
-    target_max_vol = max_weekly_cap * (target_max / 100.0) # 93%
+    target_min_vol = max_weekly_cap * (target_min / 100.0)
+    target_max_vol = max_weekly_cap * (target_max / 100.0)
 
     if not selected_indices:
         return df_res, 0, 0, "ไม่พบจุดพิกัดที่ถูกลากคลุม กรุณาใช้เครื่องมือ Lasso หรือ Box เลือกพื้นที่บนแผนที่"
 
-    # ดึงจุดที่ผู้ใช้ลากคลุมมาเป็นกลุ่มตั้งต้นของรถคันใหม่ ('NEW-CAR-99')
     selected_subset = df_res.iloc[selected_indices].copy()
     total_vol = selected_subset['ยอดส่งเฉลี่ยต่อสัปดาห์_คำนวณ'].sum()
 
     msg = ""
-    # กรณี 1: ยอดเกินเกณฑ์ (>93%) -> ตัดขอบนอกออกอัตโนมัติจนกว่าจะเข้าเกณฑ์เป้าหมาย
     if total_vol > target_max_vol:
-        # คำนวณจุดศูนย์กลางของพื้นที่ที่ลากคลุม เพื่อตัดจุดที่อยู่รอบนอกสุดออกก่อน
         center_lat = selected_subset['latitude'].mean()
         center_lon = selected_subset['longitude'].mean()
         selected_subset['dist_from_center'] = np.sqrt((selected_subset['latitude'] - center_lat)**2 + (selected_subset['longitude'] - center_lon)**2)
-        selected_subset = selected_subset.sort_values(by='dist_from_center', ascending=False) # ไกลสุดอยู่บนสุด
+        selected_subset = selected_subset.sort_values(by='dist_from_center', ascending=False)
 
         accumulated_vol = total_vol
         valid_indices = []
@@ -244,27 +240,22 @@ def process_lasso_selection_route(df_in, selected_indices, target_min=90.0, targ
                 valid_indices.append(idx)
 
         df_res.loc[valid_indices, 'เบอร์รถ'] = 'NEW-CAR-99'
-        msg = f"⚠️ พื้นที่ลากคลุมมียอดส่งเกินเกณฑ์ (>93%) ระบบได้ทำการตัดขอบนอกออกอัตโนมัติ คงเหลือยอดส่ง {round(accumulated_vol, 2)} ถัง/สัปดาห์ (คิดเป็น {round((accumulated_vol/max_weekly_cap)*100, 2)}%) เข้าสู่เกณฑ์ปกติ"
+        msg = f"⚠️ พื้นที่ลากคลุมมียอดส่งเกินเกณฑ์ (>93%) ระบบได้ทำการตัดขอบนอกออกอัตโนมัติ คงเหลือยอดส่ง {round(accumulated_vol, 2)} ถัง/สัปดาห์ ({round((accumulated_vol/max_weekly_cap)*100, 2)}%) เข้าสู่เกณฑ์ปกติ"
         
-        # นำจุดที่โดนตัดออกไปเกลี่ยเพิ่มให้กับเบอร์รถเดิมที่อยู่ใกล้ที่สุด
         for drop_idx in dropped_indices:
             drop_row = df_res.loc[drop_idx]
-            # หารรถคันเดิมที่ใกล้ที่สุด (ยกเว้น NEW-CAR-99)
             other_cars = df_res[df_res['เบอร์รถ'] != 'NEW-CAR-99']
             if not other_cars.empty:
                 dists = np.sqrt((other_cars['latitude'] - drop_row['latitude'])**2 + (other_cars['longitude'] - drop_row['longitude'])**2)
                 nearest_car = other_cars.loc[dists.idxmin(), 'เบอร์รถ']
                 df_res.loc[drop_idx, 'เบอร์รถ'] = nearest_car
 
-    # กรณี 2: ยอดต่ำกว่าเกณฑ์ (<90%) -> แจ้งเตือนว่ายอดไม่ครบ และแนะนำให้ลากคลุมเพิ่ม หรือระบบช่วยดึงจุดใกล้เคียงมาเติมให้ครบ
     elif total_vol < target_min_vol:
-        needed_vol = target_min_vol - total_vol
         msg = f"⚠️ ยอดส่งต่ำกว่าเกณฑ์ (<90% โดยมียอด {round(total_vol, 2)} ถัง/สัปดาห์ หรือ {round((total_vol/max_weekly_cap)*100, 2)}%) ระบบกำลังดึงจุดส่งรอบข้างที่ใกล้ที่สุดมาเติมให้ครบช่วง 90-93%..."
         
         df_res.loc[selected_subset.index, 'เบอร์รถ'] = 'NEW-CAR-99'
         current_new_vol = total_vol
 
-        # หาจุดภายนอกที่อยู่ใกล้กลุ่มนี้ที่สุดมาเติม
         outside_df = df_res[df_res['เบอร์รถ'] != 'NEW-CAR-99'].copy()
         if not outside_df.empty:
             center_lat = selected_subset['latitude'].mean()
@@ -284,7 +275,6 @@ def process_lasso_selection_route(df_in, selected_indices, target_min=90.0, targ
                     break
             msg += f" เติมจุดส่งใกล้เคียงสำเร็จ {added_count} จุด ยอดรวมใหม่เป็น {round(current_new_vol, 2)} ถัง/สัปดาห์ ({round((current_new_vol/max_weekly_cap)*100, 2)}%)"
     
-    # กรณี 3: อยู่ในเกณฑ์พอดี (90-93%)
     else:
         df_res.loc[selected_subset.index, 'เบอร์รถ'] = 'NEW-CAR-99'
         msg = f"✅ พื้นที่ลากคลุมอยู่ในเกณฑ์ปกติเป๊ะ ({round((total_vol/max_weekly_cap)*100, 2)}% หรือ {round(total_vol, 2)} ถัง/สัปดาห์) สร้างสายส่งใหม่สำเร็จ"
@@ -328,18 +318,15 @@ if uploaded_main_file is not None and uploaded_cap_file is not None:
         # TAB 2: จัดสายส่งใหม่ด้วยการลากคลุมพื้นที่ (Lasso / Box Select)
         with tab2:
             st.subheader("🖱️ จัดสายส่งใหม่ด้วยการลากคลุมพื้นที่บนแผนที่ (Interactive Lasso / Box Select)")
-            st.info("💡 **วิธีใช้งาน:** ใช้เครื่องมือ **Lasso Select (ไอคอนบ่วงบาศ)** หรือ **Box Select (ไอคอนสี่เหลี่ยม)** ที่มุมขวาบนของแผนที่ด้านล่าง ลากคลุมพื้นที่ลูกค้าที่คุณต้องการสร้างเป็นสายส่งใหม่ ระบบจะทำการคำนวณและปรับสัดส่วนให้อยู่ในเกณฑ์ 90-93% อัตโนมัติ")
+            st.info("💡 **วิธีใช้งาน:** ใช้เครื่องมือ **Lasso Select (ไอคอนบ่วงบาศ)** หรือ **Box Select (ไอคอนสี่เหลี่ยม)** ที่มุมขวาบนของกราฟด้านล่าง ลากคลุมพื้นที่ลูกค้าที่คุณต้องการสร้างเป็นสายส่งใหม่ ระบบจะทำการคำนวณและปรับสัดส่วนให้อยู่ในเกณฑ์ 90-93% อัตโนมัติ")
 
             selected_cars_tab2 = st.multiselect("🎨 เลือกเบอร์รถบนแผนที่เพื่อช่วยในการลากคลุม:", options=all_cars, default=all_cars, key="tab2_car_selector")
             active_cars_tab2 = selected_cars_tab2 if selected_cars_tab2 else all_cars
 
-            # เรียกใช้ Plotly Map พร้อมรับข้อมูลการลากคลุม (Selection Event)
             selection_event = render_plotly_map(df, active_cars_tab2, "map_tab2")
 
-            # ตรวจสอบจุดพิกัดที่ผู้ใช้ลากคลุมเลือก
             selected_indices = []
             if selection_event and "point_indices" in selection_event.get("selection", {}):
-                # แปลงจุดที่เลือกในแบบ filtered กลับเป็น index ของ df หลัก
                 filtered_df_temp = df[df['เบอร์รถ'].astype(str).isin(active_cars_tab2)].reset_index(drop=True)
                 selected_filtered_indices = selection_event["selection"]["point_indices"]
                 if selected_filtered_indices:
