@@ -113,7 +113,12 @@ def calculate_row_weekly_volume(row, day_counts):
 @st.cache_data
 def process_data(df_main, df_cap, year, month):
     df = df_main.copy()
-    df['ยอดส่ง/เดือน'] = pd.to_numeric(df.get('ยอดส่ง/เดือน', 0), errors='coerce').fillna(0)
+    
+    # แก้ไขการตรวจสอบและจัดการคอลัมน์เพื่อป้องกันปัญหา 'int' object has no attribute 'fillna'
+    if 'ยอดส่ง/เดือน' in df.columns:
+        df['ยอดส่ง/เดือน'] = pd.to_numeric(df['ยอดส่ง/เดือน'], errors='coerce').fillna(0)
+    else:
+        df['ยอดส่ง/เดือน'] = 0.0
     
     if df_cap is not None:
         if 'กำลังส่ง' in df_cap.columns and 'เบอร์รถ' in df_cap.columns:
@@ -123,12 +128,21 @@ def process_data(df_main, df_cap, year, month):
             df.rename(columns={'กำลังส่ง': 'กำลังบรรทุกต่อวัน(ถัง)'}, inplace=True)
             df.drop(columns=['เบอร์รถ_str'], inplace=True, errors='ignore')
             
-    df['กำลังบรรทุกต่อวัน(ถัง)'] = pd.to_numeric(df.get('กำลังบรรทุกต่อวัน(ถัง)', 200), errors='coerce').fillna(200)
+    if 'กำลังบรรทุกต่อวัน(ถัง)' in df.columns:
+        df['กำลังบรรทุกต่อวัน(ถัง)'] = pd.to_numeric(df['กำลังบรรทุกต่อวัน(ถัง)'], errors='coerce').fillna(200)
+    else:
+        df['กำลังบรรทุกต่อวัน(ถัง)'] = 200.0
 
     if 'พิกัด Lat/Long' in df.columns:
         coords = df['พิกัด Lat/Long'].astype(str).str.split(',', expand=True)
-        df['latitude'] = pd.to_numeric(coords[0].str.strip(), errors='coerce').fillna(13.7563)
-        df['longitude'] = pd.to_numeric(coords[1].str.strip(), errors='coerce').fillna(100.5018)
+        if 0 in coords.columns:
+            df['latitude'] = pd.to_numeric(coords[0].str.strip(), errors='coerce').fillna(13.7563)
+        else:
+            df['latitude'] = 13.7563
+        if 1 in coords.columns:
+            df['longitude'] = pd.to_numeric(coords[1].str.strip(), errors='coerce').fillna(100.5018)
+        else:
+            df['longitude'] = 100.5018
     else:
         df['latitude'] = 13.7563
         df['longitude'] = 100.5018
